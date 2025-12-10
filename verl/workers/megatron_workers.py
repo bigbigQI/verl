@@ -399,17 +399,34 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                     if self.bridge is not None:
                         local_model_path = get_hf_model_path(self.config)
                         if self.vanilla_bridge:
+                            print("[lark]: use vanilla bridge in actor_module init")
                             self.bridge.load_weights(actor_module, local_model_path)
                         else:
+                            print("[lark]: not vanilla bridge in actor_module init")
                             self.bridge.load_hf_weights(actor_module, local_model_path)
                     else:
                         load_megatron_gptmodel_weights(
                             self.config, self.hf_config, actor_module, params_dtype=self.dtype, is_value_model=False
                         )
+            # from modelopt.torch.export.quant_utils import get_quantization_format, QUANTIZATION_NONE
+            # for name, submodule in actor_module[0].named_modules():
+            #     if "layers.0" in name:
+            #         print("[lark] original module:", name, "type:", type(submodule).__name__)
 
             if self.rank == 0:
                 print_model_size(actor_module[0])
             log_gpu_memory_usage("After MegatronPPOActor init", logger=logger)
+            quantization = self.config.actor.megatron.get("quantization", None)
+            if quantization is not None:
+                from verl.utils.qat_utils import QATConfig, apply_qat, is_qat_enabled
+                if is_qat_enabled(quantization):
+                    print(f"[lark]: Applying QAT with method: {quantization}")
+                    qat_config = QATConfig(enabled=True, quant_method=quantization)
+                    print("[lark]: length of actor_module:", len(actor_module))
+                    for i in range(len(actor_module)):
+                        actor_module[i] = apply_qat(actor_module[i], qat_config)
+                    print("[lark]: QAT applied to all actor model chunks")
+
         elif self._is_ref:
             wrap_config = McoreModuleWrapperConfig(
                 is_value_model=False,  # ref is not value model
@@ -653,12 +670,18 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             load_megatron_model_to_gpu(self.actor.actor_module, load_grad=False)
             log_gpu_memory_usage("After load actor params during rollout_mode", logger=logger)
 
+        # from modelopt.torch.export.quant_utils import get_quantization_format
+        # print("[lark]: weight format:", get_quantization_format(self.actor.actor_module[0]))
+
         if self.bridge is not None:
             if self.vanilla_bridge:
-                per_tensor_param = self.bridge.export_weights(self.actor.actor_module)
+                print("[lark]: vanilla bridge in rollout_mode")
+                per_tensor_param = self.bridge.export_weights(self.actor.actor_module)        
             else:
+                print("[lark]: not vanilla bridge in rollout_mode")
                 per_tensor_param = self.bridge.export_hf_weights(self.actor.actor_module)
         else:
+            print("[lark]: no bridge in rollout_mode")
             per_tensor_param = per_tensor_generator(
                 self.actor.actor_module,
                 self.actor_model_config,
@@ -666,6 +689,20 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.tf_config,
                 self.layer_name_mapping,
             )
+            from verl.utils.qat_post_utils import QATWeightPostProcessor
+            qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True)
+            # Wrap the iterator with quantization processing to get quantized weights and scales
+            per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
+
+
+            # rank = torch.distributed.get_rank()
+            # state_dict = {}
+            # for name, weight in per_tensor_param:
+            #     state_dict[name] = weight.data.cpu()
+            # path = f"/apps/quant_models/qwen3_8b_nvfp4/model_rank_{rank}.pt"
+            # torch.save(state_dict, path)
+            # del state_dict
+            # print(f"[lark]: saved state_dict to {path}")
 
         set_expandable_segments(False)
 

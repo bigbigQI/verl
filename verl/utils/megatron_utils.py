@@ -915,6 +915,8 @@ def per_tensor_generator(
             existing_keys = set()
             model = unwrap_model(actor_module[scan_vpp_idx])
             for name, param in model.named_parameters():
+                if "_amax" in name:
+                    continue
                 existing_keys.add(name)
                 yield name, param
             # note
@@ -923,6 +925,8 @@ def per_tensor_generator(
             # state_dict(). for now we patch it by adding those keys to extra_keys.
             extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
             for name in extra_keys:
+                if "_amax" in name:
+                    continue
                 yield name, model.state_dict()[name].to(get_device_id())
 
     # we need first make all rank get full model information
@@ -931,10 +935,14 @@ def per_tensor_generator(
         existing_keys = set()
         model = unwrap_model(actor_module[scan_vpp_idx])
         for idx, (name, _) in enumerate(model.named_parameters()):
+            if "_amax" in name:
+                continue
             existing_keys.add(name)
             meta_info.append((pp_rank, scan_vpp_idx, idx, name))
         extra_keys = [x for x in model.state_dict().keys() if "_extra_state" not in x and x not in existing_keys]
         for name in extra_keys:
+            if "_amax" in name:
+                continue
             meta_info.append((pp_rank, scan_vpp_idx, idx, name))
 
     obj_spec_output = [None] * mpu.get_pipeline_model_parallel_world_size()
@@ -1028,7 +1036,6 @@ def per_tensor_generator(
             )
         else:
             infer_params = broad_pp_tensor
-
         if not isinstance(infer_params, list):
             infer_params = [infer_params]
         converted_names, converted_params = weight_converter.convert_param(cur_name, infer_params)

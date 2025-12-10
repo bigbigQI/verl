@@ -400,6 +400,8 @@ def _load_hf_model(config, model_config, is_value_model):
     """Helper function containing the loading hf model logic"""
     from accelerate import init_empty_weights
     from megatron.core import parallel_state as mpu
+    import modelopt.torch.opt as mto
+    mto.enable_huggingface_checkpointing()
 
     from verl.models.mcore.saver import _megatron_calc_global_rank
 

@@ -47,6 +47,7 @@ class McoreEngineConfig(BaseConfig):
         override_transformer_config (dict[str, Any]): Override configuration for transformer.
         use_mbridge (bool): Whether to use MBridge for communication.
         dtype (str): Mixed precision training param dtype, default "bfloat16"
+        quantization (Optional[str]): Quantization method to use. None for no quantization, "nvfp4_qat" for QAT.
     """
 
     # sequence_parallel is not listed as a frozen field for auto-correction purpose
@@ -75,6 +76,7 @@ class McoreEngineConfig(BaseConfig):
     forward_only: bool = False
     strategy: str = "megatron"
     dtype: str = "bfloat16"  # ["bfloat16", "float16"]
+    quantization: Optional[str] = None
 
     def __post_init__(self) -> None:
         """config validation logics go here"""

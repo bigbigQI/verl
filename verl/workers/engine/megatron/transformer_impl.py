@@ -245,6 +245,23 @@ class MegatronEngine(BaseEngine):
         if torch.distributed.get_rank() == 0:
             print_model_size(module[0])
 
+        # Apply QAT if enabled
+        # print("[lark]: self.engine_config.quantization:", self.engine_config.quantization)
+        logger.warning("[lark]: self.engine_config.quantization: %s", self.engine_config.quantization)
+        if self.engine_config.quantization is not None:
+            from verl.utils.qat_utils import QATConfig, apply_qat, is_qat_enabled
+            print("[lark]: quantization is not None")
+            print("[lark]: is_qat_enabled(self.engine_config.quantization):", is_qat_enabled(self.engine_config.quantization))
+            if is_qat_enabled(self.engine_config.quantization):
+                print("[lark]: applying QAT")
+                qat_config = QATConfig(enabled=True, quant_method=self.engine_config.quantization)
+                # Apply QAT to each model chunk in the module list
+                for i in range(len(module)):
+                    print("[lark]: applying QAT to model chunk:", module[i])
+                    module[i] = apply_qat(module[i], qat_config)
+                print("[lark]: QAT applied to all model chunks")
+                logger.info("QAT applied to all model chunks")
+
         return module
 
     def _build_optimizer(self):
@@ -272,7 +289,8 @@ class MegatronEngine(BaseEngine):
 
     def initialize(self):
         self._build_tf_config()
-
+        # print("[lark]: building megatron module")
+        logger.warning("[lark]: building megatron module")
         self.module = self._build_megatron_module()
 
         # For forward_only, we don't need optimizer, lr_scheduler, checkpoint_mananager

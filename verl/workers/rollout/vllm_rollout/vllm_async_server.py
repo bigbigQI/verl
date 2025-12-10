@@ -229,6 +229,40 @@ class vLLMHttpServerBase:
                 # Apply vllm fp8 patches
                 # Will remove the patch after vllm support on-the-fly quant for rollout natively.
                 apply_vllm_fp8_patches()
+            elif quantization == "nvfp4_qat":
+                print("[lark]: vllm quantization is nvfp4_qat")
+                fp4_block_quant_kwargs = {
+                    "config_groups": {
+                        "group_0": {
+                            "input_activations": {
+                                "dynamic": "false",
+                                "num_bits": 4,
+                                "type": "float",
+                                "group_size": 16
+                            },
+                            "weights": {
+                                "dynamic": "false",
+                                "num_bits": 4,
+                                "type": "float",
+                                "group_size": 16
+                            },
+                            "targets": [
+                                "Linear"
+                            ]
+                        }
+                    },
+                    "ignore": [
+                        "lm_head"
+                    ],
+                    "quant_algo": "NVFP4",
+                    "producer": {
+                        "name": "modelopt",
+                        "version": "0.40.0.dev89+g0ec5e200f.d20251127"
+                    },
+                    "quant_method": "modelopt"
+                }
+                from verl.utils.modelopt_utils import apply_vllm_modelopt_patches
+                apply_vllm_modelopt_patches()
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         args = {
@@ -250,7 +284,7 @@ class vLLMHttpServerBase:
             "seed": self.config.get("seed", 0),
             "override_generation_config": json.dumps(override_generation_config),
             "quantization": quantization,
-            "hf_overrides": {"quantization_config": fp8_block_quant_kwargs} if quantization == "fp8" else None,
+            "hf_overrides": {"quantization_config": fp4_block_quant_kwargs} if quantization == "nvfp4_qat" else None,
             **engine_kwargs,
         }
 
