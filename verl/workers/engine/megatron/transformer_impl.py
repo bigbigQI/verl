@@ -31,7 +31,10 @@ from verl.utils.checkpoint.megatron_checkpoint_manager import MegatronCheckpoint
 from verl.utils.dataset.dataset_utils import DatasetPadMode
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.megatron.pipeline_parallel import make_batch_generator
-from verl.utils.megatron.tensor_parallel import vocab_parallel_entropy, vocab_parallel_log_probs_from_logits
+from verl.utils.megatron.tensor_parallel import (
+    vocab_parallel_entropy,
+    vocab_parallel_log_probs_from_logits,
+)
 from verl.utils.megatron_utils import (
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -40,11 +43,18 @@ from verl.utils.megatron_utils import (
     per_tensor_generator,
     register_megatron_training_hooks,
 )
-from verl.utils.model import load_mcore_dist_weights, load_megatron_gptmodel_weights
+from verl.utils.model import (
+    extract_multi_modal_inputs_tensordict,
+    load_mcore_dist_weights,
+    load_megatron_gptmodel_weights,
+)
 from verl.workers.config import HFModelConfig, McoreEngineConfig, McoreOptimizerConfig
 
 from ..base import BaseEngine, EngineRegistry
-from ..utils import postprocess_batch_func, prepare_micro_batches
+from ..utils import (
+    postprocess_batch_func,
+    prepare_micro_batches,
+)
 from .utils import set_random_seed
 
 logger = logging.getLogger(__file__)
@@ -109,7 +119,6 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
-        tf_config = hf_to_mcore_config(self.model_config.hf_config, self.dtype, **override_transformer_config)
 
         use_mbridge = self.engine_config.use_mbridge
         self.provider = None
@@ -163,6 +172,7 @@ class MegatronEngine(BaseEngine):
             self.bridge = bridge
         else:
             self.bridge = None
+            tf_config = hf_to_mcore_config(self.model_config.hf_config, self.dtype, **override_transformer_config)
 
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
@@ -179,7 +189,10 @@ class MegatronEngine(BaseEngine):
         )
 
     def _build_megatron_module(self):
-        from verl.utils.megatron_utils import McoreModuleWrapperConfig, make_megatron_module
+        from verl.utils.megatron_utils import (
+            McoreModuleWrapperConfig,
+            make_megatron_module,
+        )
         from verl.utils.model import print_model_size
 
         # TODO: add more cases
@@ -223,7 +236,7 @@ class MegatronEngine(BaseEngine):
                     self.bridge.load_weights(module, self.model_config.local_path)
                 else:
                     allowed_mismatched_params = []
-                    if self.engine_config.is_value_model:
+                    if self.is_value_model:
                         allowed_mismatched_params = ["output_layer.weight"]
                     self.bridge.load_hf_weights(
                         module, self.model_config.local_path, allowed_mismatched_params=allowed_mismatched_params
@@ -265,9 +278,16 @@ class MegatronEngine(BaseEngine):
         return module
 
     def _build_optimizer(self):
-        from verl.utils.megatron.optimizer import get_megatron_optimizer, init_megatron_optim_config
+        from verl.utils.megatron.optimizer import (
+            get_megatron_optimizer,
+            init_megatron_optim_config,
+        )
 
-        optim_config_megatron = init_megatron_optim_config(self.optimizer_config, self.param_dtype == torch.float16)
+        optim_config_megatron = init_megatron_optim_config(
+            self.optimizer_config,
+            use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
+            fp16=self.param_dtype == torch.float16,
+        )
         optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
         register_megatron_training_hooks(self.module, optimizer)
         return optimizer
@@ -610,36 +630,13 @@ class EngineTrainModeCtx:
 @EngineRegistry.register(model_type="language_model", backend="megatron")
 class MegatronEngineWithLMHead(MegatronEngine):
     def prepare_model_inputs(self, batch: TensorDict):
-        batch = batch.to(get_device_id())
-        batch = batch.contiguous()
         input_ids = batch["input_ids"]
         loss_mask = batch["loss_mask"].to(bool)
-        position_ids = batch["position_ids"]
-
-        # process vlm inputs
-        has_multi_modal_inputs = "multi_modal_inputs" in batch.keys()
-        if has_multi_modal_inputs:
-            batch["multi_modal_inputs"] = batch["multi_modal_inputs"]
-            batch["multi_modal_inputs_idx"] = torch.Tensor(list(range(len(batch["multi_modal_inputs"])))).to(
-                torch.int64
-            )
-
-        if batch["position_ids"].dim() == 3:  # qwen2vl mrope [bs, 3, seq_len]
-            batch["position_ids"] = batch["position_ids"][
-                :, 0
-            ]  # mcore patch recompute qwen2vl's pos ids during forward
-
-        multi_modal_inputs = {}
-        if "multi_modal_inputs" in batch:
-            from verl.utils.model import extract_multi_modal_inputs
-
-            indices = batch.get("multi_modal_inputs_idx", None)
-            multi_modal_inputs = extract_multi_modal_inputs(batch["multi_modal_inputs"], indices)
+        multi_modal_inputs = extract_multi_modal_inputs_tensordict(batch)
 
         return {
             "input_ids": input_ids,
             "loss_mask": loss_mask,
-            "position_ids": position_ids,
             "multi_modal_inputs": multi_modal_inputs,
         }
 
@@ -684,12 +681,13 @@ class MegatronEngineWithLMHead(MegatronEngine):
             ret = {}
             if calculate_entropy:
                 logits_bak = logits.clone()
-                if torch.distributed.get_rank() == 0:
-                    logger.warning_once(
-                        "For memory-efficient computation, enable fused kernels via "
-                        "`actor_rollout_ref.model.use_fused_kernels=True`. "
-                        "The current `clone()` operation ensures correctness but increases memory usage."
-                    )
+                # # disable the hint until the fused_kernel is optimized for triton>=3.3
+                # if torch.distributed.get_rank() == 0:
+                #     logger.warning_once(
+                #         "For memory-efficient computation, enable fused kernels via "
+                #         "`actor_rollout_ref.model.use_fused_kernels=True`. "
+                #         "The current `clone()` operation ensures correctness but increases memory usage."
+                #     )
                 entropy = vocab_parallel_entropy(logits)
                 ret["entropy"] = entropy
             else:
@@ -707,6 +705,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
             multi_modal_inputs,
             logits_processor=logits_processor,
             logits_processor_args=logits_processor_args,
+            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+            pad_token_id=self.model_config.tokenizer.pad_token_id,
+            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
@@ -721,20 +722,21 @@ class MegatronEngineWithLMHead(MegatronEngine):
             loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
             # scale loss by num_micro_batch because megatron will scale loss
             # by n_micro_batch inside pp schedule
-            loss = loss * data["num_micro_batch"]
+            scaled_loss = loss * data["num_micro_batch"]
         else:
             assert forward_only, "forward_only must be True when loss_function is None"
             loss = torch.tensor(1.0, device=device)
+            scaled_loss = loss
             metrics = {}
 
         output = {
             "model_output": model_output,
-            "loss": loss,
+            "loss": loss.detach().item(),
             "metrics": metrics,
         }
 
         # return loss and stats
-        return loss, output
+        return scaled_loss, output
 
 
 @EngineRegistry.register(model_type="value_model", backend="megatron")
@@ -756,6 +758,8 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             input_ids,
             multi_modal_inputs,
             value_model=True,
+            vision_model=hasattr(self.model_config.hf_config, "vision_config"),
+            pad_token_id=self.model_config.tokenizer.pad_token_id,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)
