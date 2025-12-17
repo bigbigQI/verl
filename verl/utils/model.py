@@ -489,6 +489,10 @@ def load_megatron_gptmodel_weights(config, model_config, parallel_model, params_
     """Load weights for mcore GPT model."""
     _, model, state_dict, is_value_model = _load_hf_model(config, model_config, is_value_model)
 
+    # for k, v in state_dict.items():
+    #     if "layers.0" in k:
+    #         print("[larkz] hf model key: ", k, "value: ", v.shape)
+
     from verl.models.mcore.loader import load_state_dict_to_megatron_gptmodel
 
     load_state_dict_to_megatron_gptmodel(

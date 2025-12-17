@@ -270,6 +270,17 @@ class MegatronModelMerger(BaseModelMerger):
             # convert meta device to empty tensor so it can use `copy_` function
             whole_model[0].module = whole_model[0].module.to_empty(device="cpu")
 
+        # Apply QAT if the checkpoint was trained with QAT
+        if self.config.quantization is not None:
+            from verl.utils.qat_utils import QATConfig, apply_qat, is_qat_enabled
+            
+            if is_qat_enabled(self.config.quantization):
+                print(f"[MegatronModelMerger] Applying QAT with method: {self.config.quantization}")
+                qat_config = QATConfig(enabled=True, quant_method=self.config.quantization)
+                for i in range(len(whole_model)):
+                    whole_model[i] = apply_qat(whole_model[i], qat_config)
+                print(f"[MegatronModelMerger] QAT applied to all {len(whole_model)} model chunks")
+
         # load state dicts
         sharded_state_dict = {}
         for vpp_rank, model in enumerate(whole_model):
@@ -367,7 +378,12 @@ class MegatronModelMerger(BaseModelMerger):
             layers_handled = 0
             keys = model_state_dict.keys()
             for key in keys:
+                # Skip extra_state keys
                 if "extra_state" in key:
+                    continue
+                # Skip quantization-related keys (from QAT training)
+                if "weight_quantizer" in key or "input_quantizer" in key:
+                    print(f"Skipping quantization key: {key}")
                     continue
                 if self.config.tie_word_embedding and ("output_layer" in key):
                     print("skip lm_head and reward_head loading because of tie_word_embeddings")

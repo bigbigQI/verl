@@ -25,15 +25,10 @@ logger = logging.getLogger(__name__)
 
 try:
     import modelopt.torch.quantization as mtq
-    from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
-    from modelopt.torch.quantization.qtensor import NVFP4QTensor
     MODELOPT_AVAILABLE = True
 except ImportError:
     MODELOPT_AVAILABLE = False
     mtq = None
-    SequentialQuantizer = None
-    TensorQuantizer = None
-    NVFP4QTensor = None
     logger.warning("ModelOpt not available. QAT will be disabled.")
 
 
@@ -108,3 +103,42 @@ def is_qat_enabled(quantization: Optional[str]) -> bool:
         True if QAT should be enabled
     """
     return quantization == "nvfp4_qat"
+
+
+def reset_quantizer_amax(model: nn.Module) -> int:
+    """Reset all amax values in quantizers of a QAT model.
+    
+    This function traverses all modules in the model and resets the _amax
+    attribute in weight_quantizer and input_quantizer. This forces the
+    quantizers to recalibrate amax during the next forward pass.
+    
+    Args:
+        model: The QAT model with quantizers
+        
+    Returns:
+        Number of quantizers that were reset
+    """
+    reset_count = 0
+    from modelopt.torch.quantization.nn import TensorQuantizer
+    from modelopt.torch.quantization.model_calib import max_calibrate
+    before_amax_dict = {}
+
+    pattern = "*weight_quantizer"
+    import fnmatch
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and fnmatch.fnmatch(name, pattern):
+            before_amax = module.amax
+            module.reset_amax()
+            reset_count += 1
+            before_amax_dict[name] = before_amax
+
+    max_calibrate(model, forward_loop=None, distributed_sync=True)
+
+    for name, module in model.named_modules():
+        if "layers.0" in name:
+            if name in before_amax_dict:
+                after_amax = module.amax
+                print(f"[lark]: reset amax for: {name} before: {before_amax_dict[name]} after: {after_amax}")
+
+    logger.info(f"Reset {reset_count} quantizer amax values for recalibration")
+    return reset_count

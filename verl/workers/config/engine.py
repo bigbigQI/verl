@@ -125,6 +125,7 @@ class McoreEngineConfig(EngineConfig):
     vanilla_mbridge: bool = True
     strategy: str = "megatron"
     quantization: Optional[str] = None
+    debug: bool = False
     
     def __post_init__(self) -> None:
         super().__post_init__()
