@@ -121,7 +121,7 @@ class McoreEngineConfig(EngineConfig):
     override_ddp_config: dict[str, Any] = field(default_factory=dict)
     override_transformer_config: dict[str, Any] = field(default_factory=dict)
     override_mcore_model_config: dict[str, Any] = field(default_factory=dict)
-    use_mbridge: bool = False
+    use_mbridge: bool = True
     vanilla_mbridge: bool = True
     strategy: str = "megatron"
     quantization: Optional[str] = None
