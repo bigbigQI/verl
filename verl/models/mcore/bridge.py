@@ -93,6 +93,10 @@ class LinearForLastLayer(torch.nn.Linear):
 # Make Megatron-Bridge AutoMapping treats the custom last layer as replicated.
 AutoMapping.register_module_type("LinearForLastLayer", "replicated")
 
+# Register quantized linear layers for Megatron-Bridge AutoMapping (used by modelopt quantization)
+AutoMapping.register_module_type("QuantColumnParallelLinear", "column")
+AutoMapping.register_module_type("QuantRowParallelLinear", "row")
+
 
 def make_value_model(hidden_size, sequence_parallel):
     """Creates a pre-wrap hook that replace the output layer with a value head.

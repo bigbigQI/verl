@@ -196,6 +196,13 @@ class MegatronWorker(Worker):
                 provider.context_parallel_size = megatron_config.context_parallel_size
                 provider.sequence_parallel = megatron_config.sequence_parallel
 
+                # provider.moe_permute_fusion = False
+                # from megatron.bridge.models.gpt_provider import quantization_layer_spec
+                # provider.transformer_layer_spec = quantization_layer_spec
+                from megatron.bridge.models.conversion.param_mapping import AutoMapping
+                AutoMapping.register_module_type('QuantTERowParallelLinear', 'row')
+                # Auto
+
                 # Match verl implementation (need variable_seq_lengths)
                 from megatron.core.transformer.enums import AttnBackend
 
@@ -706,30 +713,33 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
                 self.tf_config,
                 self.layer_name_mapping,
             )
-            debug = self.config.actor.megatron.get("debug", False)
-            if is_qat_enabled(self.config.actor.megatron.quantization):
-                print("[lark]: rollout mode: quantizing weights with QAT")
-                from verl.utils.qat_post_utils import QATWeightPostProcessor
-                print(f"[lark]: debug: {debug}")
-                if debug:
-                    qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=False)
-                else:
-                    qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True)
-                per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
-
+        debug = self.config.actor.megatron.get("debug", False)
+        print(f"[lark]: debug: {debug}")
+        if is_qat_enabled(self.config.actor.megatron.quantization):
+            print("[lark]: rollout mode: quantizing weights with QAT")
+            from verl.utils.qat_post_utils import QATWeightPostProcessor
             if debug:
-                rank = torch.distributed.get_rank()
-                state_dict = {}
-                for name, weight in per_tensor_param:
-                    state_dict[name] = weight.data.cpu()
-                path = f"/apps/quant_models/qwen3_8b_nvfp4/model_rank_{rank}.pt"
-                torch.save(state_dict, path)
-                del state_dict
-                print(f"[lark]: saved state_dict to {path}")
+                qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True)
+            else:
+                qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True)
+            per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
+
+        # per_tensor_param = list(per_tensor_param)
+        # if debug:
+        #     rank = torch.distributed.get_rank()
+        #     state_dict = {}
+        #     for name, weight in per_tensor_param:
+        #         state_dict[name] = weight.data.cpu()
+        #     path = f"/apps/quant_models/qwen3_8b_nvfp4/model_rank_{rank}.pt"
+        #     torch.save(state_dict, path)
+        #     del state_dict
+        #     print(f"[lark]: saved state_dict to {path}")
 
         if self.config.rollout.free_cache_engine:
             await self.rollout.resume(tags=["weights"])
         await self.rollout.update_weights(per_tensor_param)
+
+        # del qat_weight_post_processor
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor.actor_module)
         aggressive_empty_cache(force_sync=True)
@@ -778,12 +788,12 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         # Reset amax values in quantizers if QAT is enabled
         # This ensures amax is recalculated during the next forward pass
         # from verl.utils.qat_utils import recalibrate_weight_quantizer_amax
-        quantization = self.config.actor.megatron.get("quantization", None)
-        if is_qat_enabled(quantization):
-            for model in self.actor.actor_module:
-                reset_quantizer_amax(model)
-            if self.rank == 0:
-                print("[QAT] Reset amax values in quantizers for recalibration")
+        # quantization = self.config.actor.megatron.get("quantization", None)
+        # if is_qat_enabled(quantization):
+        #     for model in self.actor.actor_module:
+        #         reset_quantizer_amax(model)
+        #     if self.rank == 0:
+        #         print("[QAT] Reset amax values in quantizers for recalibration")
 
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
         data.meta_info["micro_batch_size"] = micro_batch_size

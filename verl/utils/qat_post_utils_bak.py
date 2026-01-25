@@ -13,7 +13,6 @@
 # limitations under the License.
 """Quantization weight post-processor for QAT models - supports bridge and native modes."""
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional
 
@@ -44,9 +43,7 @@ class QuantizationMetadata:
     # Fields for EP synchronization - store amax values for non-local experts
     weight_amax: Optional[torch.Tensor] = None
     input_amax: Optional[torch.Tensor] = None
-    is_local: bool = True  # Whether this expert is local to current EP rank
-    global_expert_idx: Optional[int] = None  # Global expert index for MoE experts
-    local_expert_idx: Optional[int] = None  # Local expert index on this EP rank
+    is_local: bool = True  # Whether
 
 
 class QATWeightPostProcessor:
@@ -69,7 +66,7 @@ class QATWeightPostProcessor:
     Note on EP (Expert Parallelism):
         - When EP is enabled, each rank only holds a subset of experts (local_experts)
         - We synchronize metadata across all EP ranks to ensure complete metadata for all experts
-        - Local expert indices are converted to global expert indices for proper mapping
+        - Global 
     """
 
     def __init__(
@@ -96,30 +93,12 @@ class QATWeightPostProcessor:
         self.use_calibrated_scale_2 = use_calibrated_scale_2
         self.quant_metadata: dict[str, QuantizationMetadata] = {}
         self.ep_size, self.ep_rank, self.ep_group = self._get_ep_info()
-        self.pp_size, self.pp_rank, self.pp_group = self._get_pp_info()
-        self.num_local_experts = 0  # Will be determined during metadata building
 
         self._build_quantization_metadata()
-        
-        global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        # print(f"[QAT PostProcessor][Rank {global_rank}] After _build_quantization_metadata: "
-        #       f"metadata_count={len(self.quant_metadata)}, ep_size={self.ep_size}, pp_size={self.pp_size}")
 
         # Synchronize metadata across EP ranks if EP is enabled
         if self.ep_size > 1:
-            print(f"[QAT PostProcessor][Rank {global_rank}] Starting EP metadata sync...")
             self._sync_quantization_metadata_across_ep()
-            print(f"[QAT PostProcessor][Rank {global_rank}] After EP sync: metadata_count={len(self.quant_metadata)}")
-        
-        # Synchronize metadata across PP ranks if PP is enabled
-        # This ensures all PP ranks have complete metadata for all layers
-        if self.pp_size > 1:
-            print(f"[QAT PostProcessor][Rank {global_rank}] Starting PP metadata sync...")
-            self._sync_quantization_metadata_across_pp()
-            print(f"[QAT PostProcessor][Rank {global_rank}] After PP sync: metadata_count={len(self.quant_metadata)}")
-        else:
-            print(f"[QAT PostProcessor][Rank {global_rank}] PP sync skipped: pp_size={self.pp_size}")
-        
         self._log_initialization_info()
 
     def _get_ep_info(self) -> tuple[int, int, Any]:
@@ -141,151 +120,14 @@ class QATWeightPostProcessor:
             pass
         return 1, 0, None
 
-    def _get_pp_info(self) -> tuple[int, int, Any]:
-        """
-        Get Pipeline Parallel information from Megatron parallel state.
-        
-        Returns:
-            (pp_size, pp_rank, pp_group): PP world size, rank, and process group
-        """
-        try:
-            from megatron.core import parallel_state as mpu
-            pp_size = mpu.get_pipeline_model_parallel_world_size()
-            pp_rank = mpu.get_pipeline_model_parallel_rank()
-            pp_group = mpu.get_pipeline_model_parallel_group()
-            
-            if torch.distributed.get_rank() == 0:
-                print(f"[QAT PostProcessor] PP info: pp_size={pp_size}, pp_rank={pp_rank}, "
-                      f"pp_group={pp_group}")
-            
-            if pp_size > 1:
-                return pp_size, pp_rank, pp_group
-            else:
-                return pp_size, pp_rank, None
-        except Exception as e:
-            if torch.distributed.get_rank() == 0:
-                print(f"[QAT PostProcessor] Warning: Failed to get PP info: {e}")
-            pass
-        return 1, 0, None
-
-    def _extract_layer_index(self, name: str) -> Optional[int]:
-        """
-        Extract layer index from parameter name.
-        
-        For mcore format: decoder.layers.{layer_idx}.xxx
-        
-        Returns:
-            Layer index or None if not a layer parameter
-        """
-        match = re.search(r'layers\.(\d+)\.', name)
-        if match:
-            return int(match.group(1))
-        return None
-
-    def _get_num_layers_per_pp_stage(self) -> int:
-        """
-        Get the number of layers per PP stage from local metadata.
-        
-        This is calculated as max(local_layer_indices) + 1
-        """
-        max_layer_idx = -1
-        for name in self.quant_metadata.keys():
-            layer_idx = self._extract_layer_index(name)
-            if layer_idx is not None and layer_idx > max_layer_idx:
-                max_layer_idx = layer_idx
-        return max_layer_idx + 1 if max_layer_idx >= 0 else 0
-
-    def _convert_local_to_global_layer_name(self, name: str, source_pp_rank: int, 
-                                             num_layers_per_stage: int) -> str:
-        """
-        Convert parameter name from local layer index to global layer index.
-        
-        Args:
-            name: Parameter name with local layer index (e.g., decoder.layers.0.xxx)
-            source_pp_rank: The PP rank this name came from
-            num_layers_per_stage: Number of layers per PP stage
-            
-        Returns:
-            Parameter name with global layer index
-        """
-        local_layer_idx = self._extract_layer_index(name)
-        if local_layer_idx is None:
-            return name
-        
-        global_layer_idx = source_pp_rank * num_layers_per_stage + local_layer_idx
-        return re.sub(r'layers\.(\d+)\.', f'layers.{global_layer_idx}.', name, count=1)
-
-    def _extract_local_expert_index(self, name: str) -> Optional[int]:
-        """
-        Extract local expert index from parameter name.
-        
-        For SequentialMLP structure, the pattern is:
-        decoder.layers.{layer}.mlp.experts.local_experts.{local_idx}.linear_fc1/fc2.weight
-        
-        Args:
-            name: Parameter name in mcore format
-            
-        Returns:
-            Local expert index or None if not an expert parameter
-        """
-        match = re.search(r'local_experts\.(\d+)\.', name)
-        if match:
-            return int(match.group(1))
-        return None
-
-    def _local_to_global_expert_index(self, local_idx: int) -> int:
-        """
-        Convert local expert index to global expert index.
-        
-        Global index = ep_rank * num_local_experts + local_idx
-        
-        Args:
-            local_idx: Local expert index on this EP rank
-            
-        Returns:
-            Global expert index
-        """
-        return self.ep_rank * self.num_local_experts + local_idx
-
-    def _convert_name_to_global_index(self, name: str, local_idx: int, global_idx: int) -> str:
-        """
-        Convert parameter name from local to global expert index.
-        
-        Args:
-            name: Original parameter name with local index
-            local_idx: Local expert index
-            global_idx: Global expert index
-            
-        Returns:
-            Parameter name with global expert index
-        """
-        return name.replace(f'local_experts.{local_idx}.', f'local_experts.{global_idx}.')
 
     def _build_quantization_metadata(self):
         """
         Extract quantization metadata from all modules in actor_module.
         Stores: {param_name: QuantizationMetadata}
-        
-        For EP training with SequentialMLP:
-        - Detects local expert indices and computes global indices
-        - Stores metadata with global expert indices as keys
         """
-        # First pass: collect all local expert indices to determine num_local_experts
-        local_expert_indices = set()
-        
-        for vpp_idx, module in enumerate(self.actor_module):
-            model = unwrap_model(module)
-            for name, submodule in model.named_modules():
-                local_idx = self._extract_local_expert_index(name)
-                if local_idx is not None:
-                    local_expert_indices.add(local_idx)
-        
-        if local_expert_indices:
-            self.num_local_experts = max(local_expert_indices) + 1
-            if torch.distributed.get_rank() == 0:
-                print(f"[QAT PostProcessor] Detected {self.num_local_experts} local experts per EP rank")
-        
-        # Second pass: build metadata with global indices
+
+       
         for vpp_idx, module in enumerate(self.actor_module):
             model = unwrap_model(module)
 
@@ -310,11 +152,6 @@ class QATWeightPostProcessor:
                 if input_quantizer is not None and hasattr(input_quantizer, "_amax"):
                     input_amax = input_quantizer._amax.clone().cpu() if input_quantizer._amax is not None else None
 
-                # Determine global expert index for MoE experts
-                local_expert_idx = self._extract_local_expert_index(name)
-                global_expert_idx = None
-                if local_expert_idx is not None and self.ep_size > 1:
-                    global_expert_idx = self._local_to_global_expert_index(local_expert_idx)
 
                 metadata = QuantizationMetadata(
                     qformat=qformat,
@@ -326,46 +163,22 @@ class QATWeightPostProcessor:
                     weight_amax=weight_amax,
                     input_amax=input_amax,
                     is_local=True,
-                    global_expert_idx=global_expert_idx,
-                    local_expert_idx=local_expert_idx,
                 )
+
 
                 for param_name, _ in submodule.named_parameters(recurse=False):
                     full_name = f"{name}.{param_name}" if name else param_name
-                    
-                    # For EP training, store with global expert index as key
-                    if local_expert_idx is not None and self.ep_size > 1:
-                        global_name = self._convert_name_to_global_index(
-                            full_name, local_expert_idx, global_expert_idx
-                        )
-                        self.quant_metadata[global_name] = metadata
-                    else:
-                        self.quant_metadata[full_name] = metadata
+                    self.quant_metadata[full_name] = metadata
 
     def _log_initialization_info(self):
         """Log initialization information for debugging."""
-        global_rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        
-        print(f"[QAT PostProcessor][Rank {global_rank}] Initialized with quantization method: {self.quantization_method}")
-        print(f"[QAT PostProcessor][Rank {global_rank}] Found {len(self.quant_metadata)} quantized parameters")
-        if self.ep_size > 1:
-            print(f"[QAT PostProcessor][Rank {global_rank}] EP enabled: ep_size={self.ep_size}, ep_rank={self.ep_rank}, "
-                  f"num_local_experts={self.num_local_experts}")
-        if self.pp_size > 1:
-            local_count = sum(1 for m in self.quant_metadata.values() if m.is_local)
-            remote_count = sum(1 for m in self.quant_metadata.values() if not m.is_local)
-            print(f"[QAT PostProcessor][Rank {global_rank}] PP enabled: pp_size={self.pp_size}, pp_rank={self.pp_rank}, "
-                  f"local_params={local_count}, remote_params={remote_count}")
+        print(f"[QAT PostProcessor] Initialized with quantization method: {self.quantization_method}")
+        print(f"[QAT PostProcessor] Found {len(self.quant_metadata)} quantized parameters")
 
-        # Log all metadata entries for debugging
+        # Log sample parameters from layer 0 for debugging
         for name, metadata in self.quant_metadata.items():
-            extra_info = ""
-            if metadata.global_expert_idx is not None:
-                extra_info = f", global_expert_idx={metadata.global_expert_idx}"
-            if not metadata.is_local:
-                extra_info += ", is_local=False"
-            print(f"[QAT PostProcessor][Rank {global_rank}] Metadata: {name}, qformat={metadata.qformat}, "
-                    f"block_size={metadata.block_size}{extra_info}")
+            if "layers.0" in name and "weight" in name:
+                print(f"[QAT PostProcessor] Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}")
 
     def _sync_quantization_metadata_across_ep(self):
         """
@@ -375,10 +188,10 @@ class QATWeightPostProcessor:
         This method gathers metadata from all EP ranks and merges them so that
         every rank has complete metadata for all experts.
         
-        For SequentialMLP structure:
-        - Local expert indices are converted to global indices
-        - Metadata is gathered and merged using global indices as keys
-        - Non-local experts have is_local=False and module/quantizers set to None
+        For non-local experts (experts on other EP ranks):
+        - module, weight_quantizer, input_quantizer will be None
+        - weight_amax and input_amax will be available for quantization
+        - is_local will be False
         """
         if self.ep_size <= 1 or self.ep_group is None:
             return
@@ -387,8 +200,8 @@ class QATWeightPostProcessor:
         # We can't send module/quantizer objects, so we extract necessary info
         local_metadata_info = {}
         for name, metadata in self.quant_metadata.items():
-            # Only sync MoE expert metadata (containing "local_experts")
-            if "local_experts" not in name:
+            # Only sync MoE expert metadata (containing "local_experts" or "experts")
+            if "local_experts" not in name and "experts" not in name:
                 continue
             
             local_metadata_info[name] = {
@@ -397,41 +210,25 @@ class QATWeightPostProcessor:
                 "vpp_idx": metadata.vpp_idx,
                 "weight_amax": metadata.weight_amax,
                 "input_amax": metadata.input_amax,
-                "global_expert_idx": metadata.global_expert_idx,
-                "local_expert_idx": metadata.local_expert_idx,
             }
         
-        # Also send num_local_experts for validation
-        sync_data = {
-            "metadata": local_metadata_info,
-            "num_local_experts": self.num_local_experts,
-            "ep_rank": self.ep_rank,
-        }
-        
         # Gather metadata from all EP ranks
-        all_sync_data = [None] * self.ep_size
+        all_metadata_info = [None] * self.ep_size
         torch.distributed.all_gather_object(
-            all_sync_data, 
-            sync_data, 
+            all_metadata_info, 
+            local_metadata_info, 
             group=self.ep_group
         )
         
-        # Validate that all ranks have the same num_local_experts
-        for rank_idx, data in enumerate(all_sync_data):
-            if data is not None and data["num_local_experts"] != self.num_local_experts:
-                print(f"[QAT PostProcessor] Warning: EP rank {rank_idx} has "
-                      f"{data['num_local_experts']} local experts, expected {self.num_local_experts}")
-        
         # Merge metadata from all ranks
-        for rank_idx, data in enumerate(all_sync_data):
+        for rank_idx, rank_metadata in enumerate(all_metadata_info):
             if rank_idx == self.ep_rank:
                 # Skip local metadata (already have it)
                 continue
             
-            if data is None:
+            if rank_metadata is None:
                 continue
-            
-            rank_metadata = data["metadata"]
+                
             for name, info in rank_metadata.items():
                 if name in self.quant_metadata:
                     # Already have this metadata (shouldn't happen with proper global indices)
@@ -449,185 +246,14 @@ class QATWeightPostProcessor:
                     weight_amax=info["weight_amax"],
                     input_amax=info["input_amax"],
                     is_local=False,  # Mark as non-local
-                    global_expert_idx=info["global_expert_idx"],
-                    local_expert_idx=info["local_expert_idx"],
                 )
                 self.quant_metadata[name] = metadata
-        
-        # Count local vs non-local experts
-        num_local = sum(1 for m in self.quant_metadata.values() if m.is_local and m.global_expert_idx is not None)
-        num_remote = sum(1 for m in self.quant_metadata.values() if not m.is_local and m.global_expert_idx is not None)
         
         if torch.distributed.get_rank() == 0:
             print(f"[QAT PostProcessor] EP metadata sync complete. "
-                  f"EP size: {self.ep_size}, Local expert params: {num_local}, "
-                  f"Remote expert params: {num_remote}, Total metadata entries: {len(self.quant_metadata)}")
+                  f"EP size: {self.ep_size}, Total metadata entries: {len(self.quant_metadata)}")
 
-    def _sync_quantization_metadata_across_pp(self):
-        """
-        Synchronize quantization metadata across all PP (Pipeline Parallel) ranks.
-        
-        When PP is enabled, each rank only holds layers for its pipeline stage.
-        This method gathers metadata from all PP ranks and merges them so that
-        every rank has complete metadata for all layers.
-        
-        IMPORTANT: In Megatron's PP mode, each PP rank uses LOCAL layer indices
-        (starting from 0), not global layer indices. For example:
-        - PP rank 0 has decoder.layers.0 (globally layer 0)
-        - PP rank 1 has decoder.layers.0 (globally layer 1)
-        
-        This method converts local layer indices to global layer indices during sync.
-        
-        For MoE SequentialMLP structure with PP:
-        - Different PP ranks hold different decoder layers
-        - Each PP rank builds metadata only for its local layers
-        - We gather and merge metadata from all PP ranks
-        - Layer indices are converted from local to global during merge
-        - Non-local layers have is_local=False and module/quantizers set to None
-        """
-        global_rank = torch.distributed.get_rank()
-        
-        print(f"[QAT PostProcessor][Rank {global_rank}] PP sync starting: "
-              f"pp_size={self.pp_size}, pp_rank={self.pp_rank}, pp_group={self.pp_group}, "
-              f"local_metadata_count={len(self.quant_metadata)}")
-        
-        if self.pp_size <= 1:
-            print(f"[QAT PostProcessor][Rank {global_rank}] PP sync skipped: pp_size <= 1")
-            return
-        
-        if self.pp_group is None:
-            print(f"[QAT PostProcessor][Rank {global_rank}] PP sync skipped: pp_group is None")
-            return
-        
-        # Verify PP group size matches expected pp_size
-        actual_pp_group_size = torch.distributed.get_world_size(group=self.pp_group)
-        print(f"[QAT PostProcessor][Rank {global_rank}] PP group size verification: "
-              f"expected={self.pp_size}, actual={actual_pp_group_size}")
-        
-        # Calculate number of layers per PP stage (needed for global layer index conversion)
-        num_layers_per_stage = self._get_num_layers_per_pp_stage()
-        print(f"[QAT PostProcessor][Rank {global_rank}] Detected {num_layers_per_stage} layers per PP stage")
-        
-        # First, convert our local metadata to use global layer indices
-        # This is needed so we can properly merge with other PP ranks
-        local_metadata_with_global_indices = {}
-        for name, metadata in self.quant_metadata.items():
-            global_name = self._convert_local_to_global_layer_name(
-                name, self.pp_rank, num_layers_per_stage
-            )
-            local_metadata_with_global_indices[global_name] = metadata
-        
-        # Update our metadata dict to use global layer indices
-        self.quant_metadata = local_metadata_with_global_indices
-        
-        # Prepare serializable metadata info for all_gather
-        # We can't send module/quantizer objects, so we extract necessary info
-        local_metadata_info = {}
-        for name, metadata in self.quant_metadata.items():
-            local_metadata_info[name] = {
-                "qformat": metadata.qformat,
-                "block_size": metadata.block_size,
-                "vpp_idx": metadata.vpp_idx,
-                "weight_amax": metadata.weight_amax,
-                "input_amax": metadata.input_amax,
-                "global_expert_idx": metadata.global_expert_idx,
-                "local_expert_idx": metadata.local_expert_idx,
-                "is_local": metadata.is_local,
-            }
-        
-        # Include PP rank info and num_layers_per_stage for global index conversion
-        sync_data = {
-            "metadata": local_metadata_info,
-            "pp_rank": self.pp_rank,
-            "num_local_experts": self.num_local_experts,
-            "num_layers_per_stage": num_layers_per_stage,
-            "global_rank": global_rank,
-        }
-        
-        print(f"[QAT PostProcessor][Rank {global_rank}] Preparing to sync {len(local_metadata_info)} metadata entries, "
-              f"sample keys (global indices): {list(local_metadata_info.keys())[:3]}")
-        
-        # Gather metadata from all PP ranks
-        all_sync_data = [None] * actual_pp_group_size
-        torch.distributed.all_gather_object(
-            all_sync_data, 
-            sync_data, 
-            group=self.pp_group
-        )
-        
-        # Debug: print what we received
-        print(f"[QAT PostProcessor][Rank {global_rank}] Received data from {len(all_sync_data)} PP ranks")
-        for i, data in enumerate(all_sync_data):
-            if data is not None:
-                sample_keys = list(data.get('metadata', {}).keys())[:2]
-                print(f"[QAT PostProcessor][Rank {global_rank}] PP rank {i}: "
-                      f"received from global_rank={data.get('global_rank', 'unknown')}, "
-                      f"pp_rank={data.get('pp_rank', 'unknown')}, "
-                      f"metadata_count={len(data.get('metadata', {}))}, "
-                      f"sample_keys={sample_keys}")
-        
-        # Merge metadata from all PP ranks
-        local_metadata_before = len(self.quant_metadata)
-        for rank_idx, data in enumerate(all_sync_data):
-            if data is None:
-                print(f"[QAT PostProcessor][Rank {global_rank}] Skipping rank_idx={rank_idx}: data is None")
-                continue
-            
-            source_pp_rank = data.get("pp_rank")
-            
-            # Skip our own data - compare by pp_rank from the data, not by index
-            if source_pp_rank == self.pp_rank:
-                print(f"[QAT PostProcessor][Rank {global_rank}] Skipping rank_idx={rank_idx}: "
-                      f"same pp_rank={self.pp_rank}")
-                continue
-            
-            rank_metadata = data["metadata"]
-            added_count = 0
-            skipped_existing = 0
-            
-            for name, info in rank_metadata.items():
-                # The name already has global layer indices (converted by the sender)
-                if name in self.quant_metadata:
-                    # Already have this metadata (shouldn't happen with correct global indices)
-                    existing = self.quant_metadata[name]
-                    if existing.is_local:
-                        skipped_existing += 1
-                        continue
-                    # If both are non-local, just keep existing
-                    skipped_existing += 1
-                    continue
-                
-                # Create metadata entry for layers from other PP ranks
-                # Note: module and quantizers are not available for non-local layers
-                metadata = QuantizationMetadata(
-                    qformat=info["qformat"],
-                    weight_quantizer=None,  # Not available for non-local PP rank
-                    input_quantizer=None,   # Not available for non-local PP rank
-                    module=None,            # Not available for non-local PP rank
-                    vpp_idx=info["vpp_idx"],
-                    block_size=info["block_size"],
-                    weight_amax=info["weight_amax"],
-                    input_amax=info["input_amax"],
-                    is_local=False,  # Mark as non-local (from other PP rank)
-                    global_expert_idx=info["global_expert_idx"],
-                    local_expert_idx=info["local_expert_idx"],
-                )
-                self.quant_metadata[name] = metadata
-                added_count += 1
-            
-            print(f"[QAT PostProcessor][Rank {global_rank}] From pp_rank={source_pp_rank}: "
-                  f"added {added_count} metadata entries, skipped {skipped_existing} existing")
-        
-        # Log statistics
-        metadata_added = len(self.quant_metadata) - local_metadata_before
-        local_count = sum(1 for m in self.quant_metadata.values() if m.is_local)
-        remote_count = sum(1 for m in self.quant_metadata.values() if not m.is_local)
-        
-        print(f"[QAT PostProcessor][Rank {global_rank}] PP metadata sync complete. "
-              f"PP size: {self.pp_size}, PP rank: {self.pp_rank}, "
-              f"Local params: {local_count}, Remote params: {remote_count}, "
-              f"Metadata added from other PP ranks: {metadata_added}, "
-              f"Total metadata entries: {len(self.quant_metadata)}")
+
 
     def _find_matching_metadata(self, param_name: str) -> QuantizationMetadata | None:
         """
@@ -714,10 +340,6 @@ class QATWeightPostProcessor:
             # Use QAT calibrated amax (may only reflect local shard statistics)
             # weight_scale_2 = amax / (6.0 * 448.0)
             weight_scale_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
-        elif metadata.weight_amax is not None:
-            # Non-local expert (EP): Use synchronized amax from metadata
-            weight_amax = metadata.weight_amax.to(weight.device)
-            weight_scale_2 = weight_amax.float() / (6.0 * 448.0)
         else:
             # Compute from all_gathered weight directly (recommended for TP)
             # weight_scale_2 = max(abs(weight)) / (6.0 * 448.0)
@@ -863,6 +485,7 @@ class QATWeightPostProcessor:
         - MoE experts: model.layers.X.mlp.experts.Y.gate_proj/up_proj/down_proj.weight
         - MoE router (gate): model.layers.X.mlp.gate.weight -> NOT quantized (returns None)
         """
+        import re
 
         # Only process weight parameters
         if not hf_name.endswith(".weight") or hf_name.endswith("._amax") or "norm" in hf_name:
@@ -897,19 +520,19 @@ class QATWeightPostProcessor:
             # HF Mixtral format: model.layers.X.block_sparse_moe.experts.Y.w1/w2/w3.weight
             expert_match = re.search(r"\.experts\.(\d+)\.", hf_name)
             if expert_match:
-                expert_id = expert_match.group(1)  # This is the global expert ID in HF format
-                # MoE expert layers - use global expert ID for SequentialMLP
+                expert_id = expert_match.group(1)
+                # MoE expert layers
                 if any(proj in hf_name for proj in ["gate_proj", "up_proj", "w1", "w3"]):
                     # Try TEGroupedMLP pattern first (all experts share same linear layer)
                     mcore_patterns.append(f"decoder.layers.{layer_num}.mlp.experts.linear_fc1.weight")
-                    # Try SequentialMLP pattern with global expert index
+                    # Also try SequentialMLP pattern (each expert has its own linear layer)
                     mcore_patterns.append(
                         f"decoder.layers.{layer_num}.mlp.experts.local_experts.{expert_id}.linear_fc1.weight"
                     )
                 elif any(proj in hf_name for proj in ["down_proj", "w2"]):
                     # Try TEGroupedMLP pattern first
                     mcore_patterns.append(f"decoder.layers.{layer_num}.mlp.experts.linear_fc2.weight")
-                    # Try SequentialMLP pattern with global expert index
+                    # Also try SequentialMLP pattern
                     mcore_patterns.append(
                         f"decoder.layers.{layer_num}.mlp.experts.local_experts.{expert_id}.linear_fc2.weight"
                     )
@@ -958,6 +581,7 @@ class QATWeightPostProcessor:
 
         Note: gate_proj is NOT the router, it's part of the MLP expert.
         """
+        import re
 
         # Pattern 1: Qwen/Qwen3 MoE router - model.layers.X.mlp.gate.weight
         # Must be exactly ".mlp.gate.weight" not ".mlp.gate_proj.weight"

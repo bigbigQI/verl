@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 from unittest.mock import patch
 
 import torch
@@ -7,8 +7,8 @@ import torch
 logger = logging.getLogger(__name__)
 from torch.nn import Parameter
 
-def _create_param_from_subclass_attributes(custom_data: torch.Tensor,
-                                           custom_weight) -> Parameter:
+
+def _create_param_from_subclass_attributes(custom_data: torch.Tensor, custom_weight) -> Parameter:
     """
     Helper to preserve custom attributes from ModelWeightParameter and
     PerTensorScaleParameter when creating new Parameters.
@@ -17,10 +17,7 @@ def _create_param_from_subclass_attributes(custom_data: torch.Tensor,
     base_param_dir = dir(torch.nn.Parameter)
     custom_weight_dir = dir(custom_weight)
     # Find the attributes that are unique to the custom parameter
-    custom_attributes = [
-        attr for attr in custom_weight_dir
-        if attr not in base_param_dir and not attr.startswith("__")
-    ]
+    custom_attributes = [attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")]
     # Set the custom attributes into the base parameter object
     for attr in custom_attributes:
         setattr(param, attr, getattr(custom_weight, attr))
@@ -28,21 +25,25 @@ def _create_param_from_subclass_attributes(custom_data: torch.Tensor,
 
 
 def process_weights_after_loading_modelopt(self, layer: torch.nn.Module) -> None:
-    if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(layer, "prefix", "").startswith("model.layers.27.self_attn"):
-        print(f"##VLLM##: {getattr(layer, 'prefix', None)}: {layer.params_dtype} bias: {getattr(layer, 'bias', None)} {layer.weight.data[0, :4]}, scale: {layer.weight_scale.data[0, :4]}, scale_2: {layer.weight_scale_2.data[0]}")
-    from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
-    from torch.nn import Parameter
+    if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(layer, "prefix", "").startswith(
+        "model.layers.27.self_attn"
+    ):
+        print(
+            f"##VLLM##: {getattr(layer, 'prefix', None)}: {layer.params_dtype} bias: {getattr(layer, 'bias', None)} {layer.weight.data[0, :4]}, scale: {layer.weight_scale.data[0, :4]}, scale_2: {layer.weight_scale_2.data[0]}"
+        )
     import vllm._custom_ops as ops
+    from torch.nn import Parameter
     from vllm.model_executor.layers.quantization.utils.marlin_utils import (
         marlin_make_workspace_new,
         marlin_permute_bias,
         marlin_permute_scales,
     )
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-        nvfp4_marlin_process_scales,
-        nvfp4_marlin_process_global_scale,
         mxfp4_marlin_process_scales,
+        nvfp4_marlin_process_global_scale,
+        nvfp4_marlin_process_scales,
     )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
 
     def _create_param_from_subclass_attributes(custom_data, custom_weight):
         param = Parameter(custom_data, requires_grad=False)
@@ -134,18 +135,15 @@ def process_weights_after_loading_modelopt(self, layer: torch.nn.Module) -> None
     layer.weight_scale_2 = _create_param_from_subclass_attributes(weight_scale_2, layer.weight_scale_2)
     weight_scale_2_max = weight_scale_2.max().to(torch.float32)
 
-    layer.alpha = Parameter(input_scale_2_max * weight_scale_2_max,
-                            requires_grad=False)
+    layer.alpha = Parameter(input_scale_2_max * weight_scale_2_max, requires_grad=False)
 
     # Calculate `1 / input_scale` so that we don't need to do so at runtime
-    layer.input_scale_inv = Parameter(
-        (1 / layer.input_scale).to(torch.float32), requires_grad=False)
+    layer.input_scale_inv = Parameter((1 / layer.input_scale).to(torch.float32), requires_grad=False)
 
     # Swizzle the weight blockscale.
     # contracting dimension is input dimension
     # block_size = 16;
-    assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
-        "Weight Block scale must be represented as FP8-E4M3")
+    assert layer.weight_scale.dtype == torch.float8_e4m3fn, "Weight Block scale must be represented as FP8-E4M3"
 
     if self.backend == "marlin":
         weight = layer.weight.data
@@ -154,8 +152,12 @@ def process_weights_after_loading_modelopt(self, layer: torch.nn.Module) -> None
         layer.weight_scale = _create_param_from_subclass_attributes(weight_scale, layer.weight_scale)
         prepare_fp4_layer_for_marlin(layer, weight_scale_2_max)
 
-        if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(layer, "prefix", "").startswith("model.layers.27.self_attn"):
-            print(f"##VLLM-MARLIN##: {getattr(layer, 'prefix', None)}: {layer.marlin_weight.data[0, :4]}, scale: {layer.marlin_weight_scale.data[0, :4]}, scale_2: {layer.marlin_weight_scale_2.data}")
+        if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(
+            layer, "prefix", ""
+        ).startswith("model.layers.27.self_attn"):
+            print(
+                f"##VLLM-MARLIN##: {getattr(layer, 'prefix', None)}: {layer.marlin_weight.data[0, :4]}, scale: {layer.marlin_weight_scale.data[0, :4]}, scale_2: {layer.marlin_weight_scale_2.data}"
+            )
 
         del layer.alpha
         # del layer.input_scale
@@ -170,11 +172,12 @@ def process_weights_after_loading_modelopt(self, layer: torch.nn.Module) -> None
         weight_scale = layer.weight_scale.data
 
         epilogue_tile_m = 128
-        weight = shuffle_matrix_a(weight.view(torch.uint8),
-                                    epilogue_tile_m)
-        weight_scale = (shuffle_matrix_sf_a(weight_scale.view(
-            torch.uint8), epilogue_tile_m).reshape(
-                weight_scale.shape).view(torch.float8_e4m3fn))
+        weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
+        weight_scale = (
+            shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
+            .reshape(weight_scale.shape)
+            .view(torch.float8_e4m3fn)
+        )
 
         layer.weight_scale = _create_param_from_subclass_attributes(weight_scale, layer.weight_scale)
         layer.weight = _create_param_from_subclass_attributes(weight, layer.weight)
@@ -249,21 +252,14 @@ def process_weights_after_loading_kv(self, layer) -> None:
         prob_scale = 1.0
 
     is_singleton_float = (
-        lambda x: isinstance(x, float)
-        or isinstance(x, torch.Tensor)
-        and x.numel() == 1
-        and x.is_floating_point()
+        lambda x: isinstance(x, float) or isinstance(x, torch.Tensor) and x.numel() == 1 and x.is_floating_point()
     )
     if not is_singleton_float(q_scale) or not is_singleton_float(prob_scale):
-        raise ValueError(
-            "Only support per-tensor scaling factorfor fp8-quantized Q/prob"
-        )
+        raise ValueError("Only support per-tensor scaling factorfor fp8-quantized Q/prob")
 
     # These are used in the final Attention.forward()
     layer._q_scale.copy_(q_scale)
-    layer._q_scale_float = (
-        q_scale.item() if isinstance(q_scale, torch.Tensor) else q_scale
-    )
+    layer._q_scale_float = q_scale.item() if isinstance(q_scale, torch.Tensor) else q_scale
 
     layer._prob_scale.copy_(prob_scale)
 
@@ -279,10 +275,11 @@ def apply_modelopt(
 ) -> torch.Tensor:
     from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
     from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import apply_fp4_marlin_linear
-    from vllm.utils.flashinfer import (flashinfer_scaled_fp4_mm)
+    from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
+
     if self.backend == "marlin":
         # if getattr(layer, "prefix", None) == "model.layers.27.mlp.gate_up_proj" or getattr(layer, "prefix", "").startswith("model.layers.27.self_attn"):
-            # print(f"##VLLM-MARLIN##: {getattr(layer, 'prefix', None)}: {layer.marlin_weight.data[0, :4]}, scale: {layer.marlin_weight_scale.data[0, :4]}, scale_2: {layer.marlin_weight_scale_2.data}")
+        # print(f"##VLLM-MARLIN##: {getattr(layer, 'prefix', None)}: {layer.marlin_weight.data[0, :4]}, scale: {layer.marlin_weight_scale.data[0, :4]}, scale_2: {layer.marlin_weight_scale_2.data}")
         return apply_fp4_marlin_linear(
             input=x,
             weight=layer.marlin_weight,
@@ -291,7 +288,8 @@ def apply_modelopt(
             workspace=layer.workspace,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
-            bias=bias)
+            bias=bias,
+        )
 
     output_dtype = x.dtype
     output_shape = [x.shape[0], layer.weight.shape[0]]
@@ -301,11 +299,11 @@ def apply_modelopt(
 
     # validate dtypes of quantized input, input block scale,
     # weight and weight_blockscale
-    assert (x_fp4.dtype == torch.uint8)
-    assert (layer.weight.dtype == torch.uint8)
-    assert (x_blockscale.dtype == torch.float8_e4m3fn)
-    assert (layer.weight_scale.dtype == torch.float8_e4m3fn)
-    assert (layer.alpha.dtype == torch.float32)
+    assert x_fp4.dtype == torch.uint8
+    assert layer.weight.dtype == torch.uint8
+    assert x_blockscale.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale.dtype == torch.float8_e4m3fn
+    assert layer.alpha.dtype == torch.float32
 
     mm_args = (
         x_fp4,
@@ -327,38 +325,38 @@ def apply_modelopt(
     return out.view(*output_shape)
 
 
-
 # =============================================================================
 # ModelOptNvFp4FusedMoE Patches
 # =============================================================================
 
+
 def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
     """
     Patched process_weights_after_loading for ModelOptNvFp4FusedMoE.
-    
+
     Key modifications compared to original:
     1. Preserves original weights in separate attributes (marlin_w13_weight, etc.)
     2. Uses _create_param_from_subclass_attributes to preserve parameter metadata
     3. Computes weight_scale_2_max before processing for Marlin
     """
     import vllm._custom_ops as ops
-    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-        marlin_make_workspace_new,
-        marlin_permute_scales,
-    )
-    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-        nvfp4_marlin_process_scales,
-        nvfp4_marlin_process_global_scale,
-    )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-        reorder_w1w3_to_w3w1,
         prepare_static_weights_for_trtllm_fp4_moe,
+        reorder_w1w3_to_w3w1,
     )
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         FlashinferMoeBackend,
         is_flashinfer_supporting_global_sf,
     )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        marlin_make_workspace_new,
+        marlin_permute_scales,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+        nvfp4_marlin_process_global_scale,
+        nvfp4_marlin_process_scales,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
 
     def prepare_moe_fp4_layer_for_marlin_patched(
         layer: torch.nn.Module,
@@ -369,7 +367,7 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
         Modified prepare_moe_fp4_layer_for_marlin that:
         1. Takes per-expert weight_scale_2 values (not max!)
         2. Saves to marlin_* attributes instead of overwriting originals
-        
+
         Args:
             w13_weight_scale_2_per_expert: shape (num_experts,) - per-expert scales
             w2_weight_scale_2_per_expert: shape (num_experts,) - per-expert scales
@@ -401,8 +399,7 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
                 size_n, size_k = k, n
 
             assert weight.shape == (e, size_n, size_k // 2), (
-                f"Weight shape mismatch for {name}: expected {(e, size_n, size_k // 2)}, "
-                f"got {weight.shape}"
+                f"Weight shape mismatch for {name}: expected {(e, size_n, size_k // 2)}, got {weight.shape}"
             )
 
             for i in range(e):
@@ -427,11 +424,11 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
         # WEIGHT SCALES - Permute scales
         for name, weight_scale_2_per_expert in [
             ("w13", w13_weight_scale_2_per_expert),
-            ("w2", w2_weight_scale_2_per_expert)
+            ("w2", w2_weight_scale_2_per_expert),
         ]:
             scales = getattr(layer, name + "_weight_scale")
             scales = scales.to(param_dtype)
-            
+
             # Convert per-expert global scale to param_dtype
             global_scale = weight_scale_2_per_expert.to(param_dtype)
 
@@ -465,7 +462,7 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
             setattr(layer, "marlin_" + name + "_weight_scale_2", global_scale)
 
     # ========== Main processing logic ==========
-    
+
     # GEMM 1 processing
     gemm1_weight = layer.w13_weight.data
     gemm1_weight_scale = layer.w13_weight_scale.data
@@ -478,9 +475,7 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
         )
         and self.moe.is_act_and_mul
     ):
-        gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(
-            gemm1_weight, gemm1_weight_scale, dim=-2
-        )
+        gemm1_weight, gemm1_weight_scale = reorder_w1w3_to_w3w1(gemm1_weight, gemm1_weight_scale, dim=-2)
 
     layer.w13_weight = _create_param_from_subclass_attributes(gemm1_weight, layer.w13_weight)
     layer.w13_weight_scale = _create_param_from_subclass_attributes(gemm1_weight_scale, layer.w13_weight_scale)
@@ -488,19 +483,12 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
     # Common processing for w13_weight_scale_2
     # IMPORTANT: Keep the original shape (num_experts, 2) for subsequent weight loading
     # Only compute the max value for Marlin, but don't modify the original parameter shape
-    if self.moe.is_act_and_mul and not torch.allclose(
-        layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-    ):
-        logger.warning(
-            "w1_weight_scale_2 must match w3_weight_scale_2. "
-            "Accuracy may be affected."
-        )
+    if self.moe.is_act_and_mul and not torch.allclose(layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]):
+        logger.warning("w1_weight_scale_2 must match w3_weight_scale_2. Accuracy may be affected.")
 
     # Keep original data and shape - DO NOT reduce dimension!
     w13_weight_scale_2_data = layer.w13_weight_scale_2.data  # Keep original shape: (num_experts, 2)
-    layer.w13_weight_scale_2 = _create_param_from_subclass_attributes(
-        w13_weight_scale_2_data, layer.w13_weight_scale_2
-    )
+    layer.w13_weight_scale_2 = _create_param_from_subclass_attributes(w13_weight_scale_2_data, layer.w13_weight_scale_2)
     # Get per-expert scales (shape: num_experts) for Marlin - NOT the max!
     # This is what the original code uses after reducing [:, 0]
     w13_weight_scale_2_per_expert = layer.w13_weight_scale_2[:, 0].clone()
@@ -509,53 +497,39 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
 
     # Common processing for input scales and alphas
     # IMPORTANT: Keep original input_scale shapes for subsequent weight loading
-    use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(
-        self.flashinfer_moe_backend
-    )
-    
+    use_global_sf = self.allow_flashinfer and is_flashinfer_supporting_global_sf(self.flashinfer_moe_backend)
+
     # Keep original w13_input_scale data and shape
     w13_input_scale_data = layer.w13_input_scale.data
-    layer.w13_input_scale = _create_param_from_subclass_attributes(
-        w13_input_scale_data, layer.w13_input_scale
-    )
-    
+    layer.w13_input_scale = _create_param_from_subclass_attributes(w13_input_scale_data, layer.w13_input_scale)
+
     # Compute derived values for runtime use
     if use_global_sf:
-        w13_input_scale_for_alpha = (
-            layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
-        )
+        w13_input_scale_for_alpha = layer.w13_input_scale.max().to(torch.float32).expand(layer.num_experts)
     else:
         w13_input_scale_for_alpha = layer.w13_input_scale.max(dim=1).values.to(torch.float32)
-    
+
     layer.g1_alphas = Parameter(
         (w13_input_scale_for_alpha * w13_weight_scale_2_1d).to(torch.float32),
         requires_grad=False,
     )
 
     # This is for quantization, so we need to invert it.
-    layer.w13_input_scale_quant = Parameter(
-        (1 / w13_input_scale_for_alpha).to(torch.float32), requires_grad=False
-    )
+    layer.w13_input_scale_quant = Parameter((1 / w13_input_scale_for_alpha).to(torch.float32), requires_grad=False)
 
     # GEMM 2 processing
     # Keep original w2_weight_scale_2 data and shape
     w2_weight_scale_2_data = layer.w2_weight_scale_2.data
-    layer.w2_weight_scale_2 = _create_param_from_subclass_attributes(
-        w2_weight_scale_2_data, layer.w2_weight_scale_2
-    )
+    layer.w2_weight_scale_2 = _create_param_from_subclass_attributes(w2_weight_scale_2_data, layer.w2_weight_scale_2)
     # Get per-expert scales (shape: num_experts) for Marlin - NOT the max!
     w2_weight_scale_2_per_expert = layer.w2_weight_scale_2.clone()
 
     # Keep original w2_input_scale data and shape
     w2_input_scale_data = layer.w2_input_scale.data
-    layer.w2_input_scale = _create_param_from_subclass_attributes(
-        w2_input_scale_data, layer.w2_input_scale
-    )
-    
+    layer.w2_input_scale = _create_param_from_subclass_attributes(w2_input_scale_data, layer.w2_input_scale)
+
     if use_global_sf:
-        w2_input_scale_for_alpha = (
-            layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
-        )
+        w2_input_scale_for_alpha = layer.w2_input_scale.max().to(torch.float32).expand(layer.num_experts)
     else:
         w2_input_scale_for_alpha = layer.w2_input_scale
     layer.g2_alphas = Parameter(
@@ -564,16 +538,11 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
     )
 
     # This is for quantization, so we need to invert it.
-    layer.w2_input_scale_quant = Parameter(
-        (1 / w2_input_scale_for_alpha).to(torch.float32), requires_grad=False
-    )
+    layer.w2_input_scale_quant = Parameter((1 / w2_input_scale_for_alpha).to(torch.float32), requires_grad=False)
 
     # ========== Backend-specific processing ==========
-    
-    if (
-        self.allow_flashinfer
-        and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-    ):
+
+    if self.allow_flashinfer and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
         # TensorRT-LLM specific processing
         (
             gemm1_weights_fp4_shuffled,
@@ -591,18 +560,10 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
         )
         logger.debug("Finished shuffling weights for TRT-LLM MOE")
 
-        layer.gemm1_weights_fp4_shuffled = Parameter(
-            gemm1_weights_fp4_shuffled, requires_grad=False
-        )
-        layer.gemm2_weights_fp4_shuffled = Parameter(
-            gemm2_weights_fp4_shuffled, requires_grad=False
-        )
-        layer.gemm1_scales_fp4_shuffled = Parameter(
-            gemm1_scales_fp4_shuffled, requires_grad=False
-        )
-        layer.gemm2_scales_fp4_shuffled = Parameter(
-            gemm2_scales_fp4_shuffled, requires_grad=False
-        )
+        layer.gemm1_weights_fp4_shuffled = Parameter(gemm1_weights_fp4_shuffled, requires_grad=False)
+        layer.gemm2_weights_fp4_shuffled = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
+        layer.gemm1_scales_fp4_shuffled = Parameter(gemm1_scales_fp4_shuffled, requires_grad=False)
+        layer.gemm2_scales_fp4_shuffled = Parameter(gemm2_scales_fp4_shuffled, requires_grad=False)
 
         # Additional parameter needed for TRT-LLM
         layer.g1_scale_c = Parameter(
@@ -615,25 +576,21 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
         del layer.w2_weight_scale
         del layer.w13_weight
         del layer.w13_weight_scale
-        
+
     elif self.use_marlin:
         # Marlin processing - use patched version
         # Pass per-expert scales (shape: num_experts), NOT scalar max values!
-        prepare_moe_fp4_layer_for_marlin_patched(
-            layer, w13_weight_scale_2_per_expert, w2_weight_scale_2_per_expert
-        )
+        prepare_moe_fp4_layer_for_marlin_patched(layer, w13_weight_scale_2_per_expert, w2_weight_scale_2_per_expert)
         # Delete attributes not needed for Marlin
         del layer.g1_alphas
         del layer.g2_alphas
         del layer.w13_input_scale_quant
         del layer.w2_input_scale_quant
-        
+
     else:
         # Non-TRT-LLM processing (Cutlass or non-flashinfer)
         w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
-        layer.w13_weight_scale = Parameter(
-            w13_blockscale_swizzled, requires_grad=False
-        )
+        layer.w13_weight_scale = Parameter(w13_blockscale_swizzled, requires_grad=False)
 
         w13_weight = layer.w13_weight
         intermediate_size_pad = w13_blockscale_swizzled.size(1) - w13_weight.size(1)
@@ -641,33 +598,24 @@ def process_weights_after_loading_moe(self, layer: torch.nn.Module) -> None:
             # padding gated activations will require to split w1 and w3
             # and pad them individually
             assert not self.moe.is_act_and_mul, (
-                "The intermediate size required padding, "
-                "but padding is not implemented for gated activations"
+                "The intermediate size required padding, but padding is not implemented for gated activations"
             )
 
             layer.w13_weight = Parameter(
-                torch.nn.functional.pad(
-                    w13_weight, (0, 0, 0, intermediate_size_pad)
-                ),
+                torch.nn.functional.pad(w13_weight, (0, 0, 0, intermediate_size_pad)),
                 requires_grad=False,
             )
             layer.w2_weight = Parameter(
-                torch.nn.functional.pad(
-                    layer.w2_weight, (0, intermediate_size_pad // 2, 0, 0)
-                ),
+                torch.nn.functional.pad(layer.w2_weight, (0, intermediate_size_pad // 2, 0, 0)),
                 requires_grad=False,
             )
             layer.w2_weight_scale = Parameter(
-                torch.nn.functional.pad(
-                    layer.w2_weight_scale, (0, intermediate_size_pad // 16)
-                ),
+                torch.nn.functional.pad(layer.w2_weight_scale, (0, intermediate_size_pad // 16)),
                 requires_grad=False,
             )
 
         w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
-        layer.w2_weight_scale = Parameter(
-            w2_blockscale_swizzled, requires_grad=False
-        )
+        layer.w2_weight_scale = Parameter(w2_blockscale_swizzled, requires_grad=False)
 
 
 def apply_moe(
@@ -695,35 +643,26 @@ def apply_moe(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Patched apply method for ModelOptNvFp4FusedMoE.
-    
+
     Key modification for Marlin: Uses marlin_* attributes instead of originals.
     """
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-        FlashinferMoeBackend,
-    )
+    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
     from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
         flashinfer_trtllm_fp4_moe,
     )
-    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        FlashinferMoeBackend,
+    )
     from vllm.scalar_type import scalar_types
 
     if not self.moe.is_act_and_mul:
-        assert (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-        ), (
-            "Non-gated activations are only supported by the"
-            " flashinfer CUTLASS backend for modelopt checkpoints"
+        assert self.allow_flashinfer and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS, (
+            "Non-gated activations are only supported by the flashinfer CUTLASS backend for modelopt checkpoints"
         )
 
-    if (
-        self.allow_flashinfer
-        and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-    ):
+    if self.allow_flashinfer and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
-            )
+            raise NotImplementedError("EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
         return flashinfer_trtllm_fp4_moe(
             layer=layer,
             x=x,
@@ -773,11 +712,13 @@ def apply_moe(
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
                 flashinfer_cutlass_moe_fp4,
             )
+
             flashinfer_fn_moe_fp4 = flashinfer_cutlass_moe_fp4
         else:
             from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
                 flashinfer_cutedsl_moe_fp4,
             )
+
             flashinfer_fn_moe_fp4 = flashinfer_cutedsl_moe_fp4
 
         assert self.moe_quant_config is not None
@@ -817,7 +758,9 @@ def apply_moe(
 
 
 def apply_vllm_modelopt_patches():
-    func1_path = "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4LinearMethod.process_weights_after_loading"
+    func1_path = (
+        "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4LinearMethod.process_weights_after_loading"
+    )
     patcher1 = patch(func1_path, process_weights_after_loading_modelopt)
     patcher1.start()
     func2_path = "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4LinearMethod.apply"
@@ -827,13 +770,11 @@ def apply_vllm_modelopt_patches():
     func5_path = "vllm.model_executor.layers.quantization.kv_cache.BaseKVCacheMethod.process_weights_after_loading"
     patcher5 = patch(func5_path, process_weights_after_loading_kv)
     patcher5.start()
-        # Patch ModelOptNvFp4FusedMoE
-    func3_path = ("vllm.model_executor.layers.quantization.modelopt."
-                  "ModelOptNvFp4FusedMoE.process_weights_after_loading")
+    # Patch ModelOptNvFp4FusedMoE
+    func3_path = "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4FusedMoE.process_weights_after_loading"
     patcher3 = patch(func3_path, process_weights_after_loading_moe)
     patcher3.start()
 
-    func4_path = ("vllm.model_executor.layers.quantization.modelopt."
-                  "ModelOptNvFp4FusedMoE.apply")
+    func4_path = "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4FusedMoE.apply"
     patcher4 = patch(func4_path, apply_moe)
     patcher4.start()

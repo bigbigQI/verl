@@ -32,6 +32,36 @@ except ImportError:
     logger.warning("ModelOpt not available. QAT will be disabled.")
 
 
+
+NVFP4_WEIGHT_ONLY_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+        "nn.BatchNorm1d": {"*": {"enable": False}},
+        "nn.BatchNorm2d": {"*": {"enable": False}},
+        "nn.BatchNorm3d": {"*": {"enable": False}},
+        "nn.LeakyReLU": {"*": {"enable": False}},
+        "*lm_head*": {"enable": False},
+        "*proj_out.*": {"enable": False},  # In Whisper model, lm_head has key name proj_out
+        "*block_sparse_moe.gate*": {"enable": False},  # Skip the MOE router
+        "*router*": {"enable": False},  # Skip the MOE router
+        "*mlp.gate.*": {"enable": False},  # Skip the MOE router
+        "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
+        "*linear_attn.conv1d*": {"enable": False},
+        "*mixer.conv1d*": {"enable": False},
+        "*output_layer*": {"enable": False},
+        "output.*": {"enable": False},
+        "default": {"enable": False},
+    },
+    "algorithm": "max",
+}
+
+
 @dataclass
 class QATConfig:
     """Configuration for Quantization-Aware Training."""
@@ -47,9 +77,8 @@ def get_nvfp4_qat_config():
     if not MODELOPT_AVAILABLE:
         raise ImportError("ModelOpt is required for QAT but not available.")
     
-    # Use the default NVFP4 config
-    # mtq_config = mtq.NVFP4_DEFAULT_CFG
-    mtq_config = mtq.NVFP4_WEIGHT_ONLY_CFG
+    # mtq_config = mtq.NVFP4_WEIGHT_ONLY_CFG
+    mtq_config = NVFP4_WEIGHT_ONLY_CFG
     
 
     mtq_config["quant_cfg"]["*mixer.*"] = {"enable": False}
