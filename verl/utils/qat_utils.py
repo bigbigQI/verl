@@ -16,21 +16,20 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Generator, Optional
+from typing import Optional
 
-import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
 try:
     import modelopt.torch.quantization as mtq
+
     MODELOPT_AVAILABLE = True
 except ImportError:
     MODELOPT_AVAILABLE = False
     mtq = None
     logger.warning("ModelOpt not available. QAT will be disabled.")
-
 
 
 NVFP4_WEIGHT_ONLY_CFG = {
@@ -65,69 +64,69 @@ NVFP4_WEIGHT_ONLY_CFG = {
 @dataclass
 class QATConfig:
     """Configuration for Quantization-Aware Training."""
+
     enabled: bool = False
     quant_method: str = "nvfp4_qat"
-    
+
 
 def get_nvfp4_qat_config():
     """Return the NVFP4 QAT configuration.
-    
+
     This uses the default NVFP4 configuration from ModelOpt.
     """
     if not MODELOPT_AVAILABLE:
         raise ImportError("ModelOpt is required for QAT but not available.")
-    
+
     # mtq_config = mtq.NVFP4_WEIGHT_ONLY_CFG
     mtq_config = NVFP4_WEIGHT_ONLY_CFG
-    
 
     mtq_config["quant_cfg"]["*mixer.*"] = {"enable": False}
-    
+
     logger.info(f"NVFP4 QAT config: {mtq_config}")
     return mtq_config
 
 
 def apply_qat(model: nn.Module, qat_config: QATConfig):
     """Apply Quantization-Aware Training to the model.
-    
+
     Args:
         model: The Megatron model to apply QAT to
         qat_config: QAT configuration
-        
+
     Returns:
         The quantized model
     """
     if not qat_config.enabled:
         logger.info("QAT is not enabled, skipping.")
         return model
-    
+
     if not MODELOPT_AVAILABLE:
         logger.warning("ModelOpt not available, skipping QAT.")
         return model
-    
+
     if qat_config.quant_method != "nvfp4_qat":
         raise ValueError(f"Only 'nvfp4_qat' is supported, got: {qat_config.quant_method}")
-    
+
     logger.info(f"Applying QAT with method: {qat_config.quant_method}")
-    
+
     # Get quantization config
     mtq_config = get_nvfp4_qat_config()
-    
+
     # Apply quantization to the model
     # For QAT, we don't need a calibration forward loop
     mtq.quantize(model, mtq_config)
-    
+
     logger.info("QAT applied successfully")
-    
+
     return model
 
 
 def is_qat_enabled(quantization: Optional[str]) -> bool:
     """Check if QAT is enabled based on quantization parameter.
-    
+
     Args:
         quantization: The quantization parameter from config
-        
+
     Returns:
         True if QAT should be enabled
     """
@@ -136,24 +135,26 @@ def is_qat_enabled(quantization: Optional[str]) -> bool:
 
 def reset_quantizer_amax(model: nn.Module) -> int:
     """Reset all amax values in quantizers of a QAT model.
-    
+
     This function traverses all modules in the model and resets the _amax
     attribute in weight_quantizer and input_quantizer. This forces the
     quantizers to recalibrate amax during the next forward pass.
-    
+
     Args:
         model: The QAT model with quantizers
-        
+
     Returns:
         Number of quantizers that were reset
     """
     reset_count = 0
-    from modelopt.torch.quantization.nn import TensorQuantizer
     from modelopt.torch.quantization.model_calib import max_calibrate
+    from modelopt.torch.quantization.nn import TensorQuantizer
+
     before_amax_dict = {}
 
     pattern = "*weight_quantizer"
     import fnmatch
+
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and fnmatch.fnmatch(name, pattern):
             before_amax = module.amax

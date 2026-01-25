@@ -273,21 +273,9 @@ class vLLMHttpServerBase:
                 fp4_block_quant_kwargs = {
                     "config_groups": {
                         "group_0": {
-                            "input_activations": {
-                                "dynamic": "false",
-                                "num_bits": 4,
-                                "type": "float",
-                                "group_size": 16
-                            },
-                            "weights": {
-                                "dynamic": "false",
-                                "num_bits": 4,
-                                "type": "float",
-                                "group_size": 16
-                            },
-                            "targets": [
-                                "Linear"
-                            ]
+                            "input_activations": {"dynamic": "false", "num_bits": 4, "type": "float", "group_size": 16},
+                            "weights": {"dynamic": "false", "num_bits": 4, "type": "float", "group_size": 16},
+                            "targets": ["Linear"],
                         }
                     },
                     "ignore": [
@@ -342,13 +330,11 @@ class vLLMHttpServerBase:
                         "lm_head"
                     ],
                     "quant_algo": "NVFP4",
-                    "producer": {
-                        "name": "modelopt",
-                        "version": "0.40.0.dev89+g0ec5e200f.d20251127"
-                    },
-                    "quant_method": "modelopt"
+                    "producer": {"name": "modelopt", "version": "0.40.0.dev89+g0ec5e200f.d20251127"},
+                    "quant_method": "modelopt",
                 }
                 from verl.utils.modelopt_utils import apply_vllm_modelopt_patches
+
                 apply_vllm_modelopt_patches()
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")

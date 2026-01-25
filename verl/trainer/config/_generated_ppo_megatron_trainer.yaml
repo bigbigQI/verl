@@ -51,6 +51,8 @@ actor_rollout_ref:
         recompute_method: null
         recompute_num_layers: null
         attention_backend: flash
+      quantization: null
+      debug: false
       override_mcore_model_config: {}
       use_mbridge: true
       vanilla_mbridge: true
@@ -186,6 +188,8 @@ actor_rollout_ref:
       seed: ${oc.select:actor_rollout_ref.actor.megatron.seed,42}
       override_ddp_config: {}
       override_transformer_config: ${oc.select:actor_rollout_ref.actor.megatron.override_transformer_config,{}}
+      quantization: null
+      debug: false
       override_mcore_model_config: {}
       use_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.use_mbridge,False}
       vanilla_mbridge: ${oc.select:actor_rollout_ref.actor.megatron.vanilla_mbridge,True}
@@ -432,6 +436,8 @@ critic:
       recompute_method: null
       recompute_num_layers: null
       attention_backend: flash
+    quantization: null
+    debug: false
     override_mcore_model_config: {}
     use_mbridge: true
     vanilla_mbridge: true

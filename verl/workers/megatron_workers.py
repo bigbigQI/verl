@@ -71,6 +71,7 @@ from verl.utils.profiler import (
     simple_timer,
 )
 from verl.utils.profiler.performance import reduce_timing, topk_reduce_ratio_min_max
+from verl.utils.qat_utils import QATConfig, apply_qat, is_qat_enabled
 from verl.utils.ray_utils import get_event_loop
 from verl.utils.torch_functional import use_original_torch_compile
 from verl.workers.actor.megatron_actor import MegatronPPOActor
@@ -78,8 +79,6 @@ from verl.workers.config import HFModelConfig, McoreCriticConfig, RolloutConfig
 from verl.workers.critic.megatron_critic import MegatronPPOCritic
 from verl.workers.reward_model.megatron.reward_model import MegatronRewardModel
 from verl.workers.rollout import get_rollout_class
-
-from verl.utils.qat_utils import QATConfig, apply_qat, is_qat_enabled, reset_quantizer_amax
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -200,7 +199,8 @@ class MegatronWorker(Worker):
                 # from megatron.bridge.models.gpt_provider import quantization_layer_spec
                 # provider.transformer_layer_spec = quantization_layer_spec
                 from megatron.bridge.models.conversion.param_mapping import AutoMapping
-                AutoMapping.register_module_type('QuantTERowParallelLinear', 'row')
+
+                AutoMapping.register_module_type("QuantTERowParallelLinear", "row")
                 # Auto
 
                 # Match verl implementation (need variable_seq_lengths)
@@ -700,7 +700,7 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if self.bridge is not None:
             if self.vanilla_bridge:
                 print("[lark]: vanilla bridge in rollout_mode")
-                per_tensor_param = self.bridge.export_weights(self.actor.actor_module)        
+                per_tensor_param = self.bridge.export_weights(self.actor.actor_module)
             else:
                 print("[lark]: not vanilla bridge in rollout_mode")
                 per_tensor_param = self.bridge.export_hf_weights(self.actor.actor_module)
@@ -718,10 +718,15 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
         if is_qat_enabled(self.config.actor.megatron.quantization):
             print("[lark]: rollout mode: quantizing weights with QAT")
             from verl.utils.qat_post_utils import QATWeightPostProcessor
+
             if debug:
-                qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True)
+                qat_weight_post_processor = QATWeightPostProcessor(
+                    self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True
+                )
             else:
-                qat_weight_post_processor = QATWeightPostProcessor(self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True)
+                qat_weight_post_processor = QATWeightPostProcessor(
+                    self.actor.actor_module, "nvfp4", self.dtype, use_calibrated_scale_2=True
+                )
             per_tensor_param = qat_weight_post_processor.process_weights_iterator(per_tensor_param)
 
         # per_tensor_param = list(per_tensor_param)
@@ -784,7 +789,6 @@ class ActorRolloutRefWorker(MegatronWorker, DistProfilerExtension):
             load_megatron_optimizer(self.actor_optimizer)
             log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
 
-        
         # Reset amax values in quantizers if QAT is enabled
         # This ensures amax is recalculated during the next forward pass
         # from verl.utils.qat_utils import recalibrate_weight_quantizer_amax

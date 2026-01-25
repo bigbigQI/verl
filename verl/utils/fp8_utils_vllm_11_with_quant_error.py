@@ -22,8 +22,8 @@ import torch
 
 try:
     from vllm._custom_ops import scaled_fp8_quant
-    from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.linear import LinearBase
 except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
 
@@ -62,11 +62,11 @@ def is_fp8_model(vllm_config):
 
 def _get_params_in_layers(param_names, layers):
     """Get parameter module names in specified layers.
-    
+
     Args:
         param_names: List of all parameter names in the model
         layers: List of layer indices to extract parameters from
-        
+
     Returns:
         List of parameter module names (without .weight suffix) in the specified layers
     """
@@ -88,12 +88,7 @@ def _get_params_in_layers(param_names, layers):
 
     params = []
     for name in param_names:
-        if (
-            any(p in name for p in prefixes)
-            and "bias" not in name
-            and "layernorm" not in name
-            and "norm" not in name
-        ):
+        if any(p in name for p in prefixes) and "bias" not in name and "layernorm" not in name and "norm" not in name:
             # Convert the param name into vllm's module name
             # Vllm wraps the model with an extra 'model'
             params.append(f"model.{name}".removesuffix(".weight"))
@@ -102,40 +97,40 @@ def _get_params_in_layers(param_names, layers):
 
 def get_bf16_layer_names(model_config, num_first_layers=0, num_last_layers=0):
     """Get parameter module names that should remain in BF16.
-    
+
     Args:
         model_config: HuggingFace model configuration
         num_first_layers: Number of first layers to keep in BF16
         num_last_layers: Number of last layers to keep in BF16
-        
+
     Returns:
         List of lists: [[first_layers_params], [last_layers_params]]
         This matches NeMo-RL's structure for vLLM's ignored_layers parameter
     """
     from accelerate import init_empty_weights
-    from transformers import AutoConfig, AutoModel
-    
+    from transformers import AutoModel
+
     if num_first_layers == 0 and num_last_layers == 0:
         return []
-    
+
     # Create empty model to get parameter names
     with init_empty_weights():
         model = AutoModel.from_config(model_config)
     param_names = [name for name, _ in model.named_parameters()]
-    
+
     bf16_params = []  # 二维列表，每个元素是一组层的参数
-    
+
     # Get first N layers
     if num_first_layers > 0:
         first_layers = list(range(num_first_layers))
         bf16_params.append(_get_params_in_layers(param_names, first_layers))
-    
+
     # Get last M layers
     if num_last_layers > 0:
         num_hidden_layers = model_config.num_hidden_layers
         last_layers = list(range(num_hidden_layers - num_last_layers, num_hidden_layers))
         bf16_params.append(_get_params_in_layers(param_names, last_layers))
-    
+
     return bf16_params
 
 
@@ -177,10 +172,10 @@ def is_fp8_weight(name, model):
             module = get_module_from_param_name(model, name)
             # We currently only quantize linear layers
             if (
-                isinstance(module, LinearBase) 
+                isinstance(module, LinearBase)
                 and module.weight.dtype == torch.float8_e4m3fn
                 or (
-                    isinstance(module, FusedMoE) 
+                    isinstance(module, FusedMoE)
                     and module.w13_weight.dtype == torch.float8_e4m3fn
                     and module.w2_weight.dtype == torch.float8_e4m3fn
                 )
@@ -192,15 +187,15 @@ def is_fp8_weight(name, model):
 def compute_quantization_error_metrics(original_weight, quantized_weight, descale=None):
     """
     Compute quantization error metrics analogous to grad_norm.
-    
+
     This function computes two key error metrics to measure precision loss during
     FP8 quantization, directly analogous to how grad_norm measures gradient magnitude.
-    
+
     Args:
         original_weight (torch.Tensor): Original high-precision weight (BF16/FP32)
         quantized_weight (torch.Tensor): Quantized FP8 weight
         descale (torch.Tensor, optional): Descale factors for dequantization
-        
+
     Returns:
         dict: Dictionary containing:
             - quant_error_norm: L2 norm of quantization error (analogous to grad_norm)
@@ -218,61 +213,61 @@ def compute_quantization_error_metrics(original_weight, quantized_weight, descal
             # Reconstruct the dequantized weight using block descaling
             block_size0, block_size1 = 128, 128  # Default block size
             blk_m, blk_n = descale.shape
-            
+
             # Convert quantized weight to float for computation
             quantized_fp32 = quantized_weight.to(torch.float32)
             quantized_fp32 = quantized_fp32.reshape(blk_m, block_size0, blk_n, block_size1)
             quantized_fp32 = quantized_fp32.permute(0, 2, 1, 3).flatten(start_dim=2)
-            
+
             # Apply descale
             dequantized = quantized_fp32 * descale.unsqueeze(-1)
-            
+
             # Reshape back
             dequantized = dequantized.reshape(blk_m, blk_n, block_size0, block_size1)
             dequantized = dequantized.permute(0, 2, 1, 3).reshape(original_weight.shape)
         else:
             # Per-tensor quantization
             dequantized = quantized_weight.to(torch.float32) * descale
-    
+
     # Convert original weight to float32 for accurate comparison
     original_fp32 = original_weight.to(torch.float32)
-    
+
     # Compute quantization error
     error = original_fp32 - dequantized
-    
+
     # Count number of elements in this parameter
     num_elements = error.numel()
-    
+
     # 1. Quantization Error Norm (L2 norm, analogous to grad_norm)
     # Formula: sqrt(sum(error^2))
     # This measures the total magnitude of quantization error across all elements
     # Directly analogous to grad_norm = sqrt(sum(grad^2))
-    quant_error_norm = torch.sum(error ** 2).item()
-    
+    quant_error_norm = torch.sum(error**2).item()
+
     # 2. Average Quantization Error (RMSE - Root Mean Square Error)
     # Formula: sqrt(mean(error^2)) = sqrt(sum(error^2) / N)
     # This measures the average per-element quantization error
     # Useful for understanding error magnitude independent of parameter size
     avg_quant_error = torch.mean(torch.abs(error)).item()
-    
+
     return {
-        "quant_error_norm": quant_error_norm,      # Total error norm (like grad_norm)
-        "avg_quant_error": avg_quant_error,        # Average per-element error (RMSE)
-        "num_elements": num_elements,              # Number of elements in this parameter
+        "quant_error_norm": quant_error_norm,  # Total error norm (like grad_norm)
+        "avg_quant_error": avg_quant_error,  # Average per-element error (RMSE)
+        "num_elements": num_elements,  # Number of elements in this parameter
     }
 
 
 def aggregate_quantization_metrics(param_metrics):
     """
     Aggregate quantization metrics across all quantized parameters.
-    
+
     Computes two types of aggregated metrics:
     1. Total quantization error norm - analogous to overall grad_norm
     2. Weighted average quantization error - average per-element error across all parameters
-    
+
     Args:
         param_metrics (dict): Dictionary mapping parameter names to their metrics
-        
+
     Returns:
         dict: Aggregated metrics including:
             - total_quant_error_norm: Overall L2 norm of all quantization errors
@@ -291,31 +286,24 @@ def aggregate_quantization_metrics(param_metrics):
             "total_elements": 0,
             "per_param_metrics": {},
         }
-    
+
     # 1. Compute total quantization error norm (analogous to grad_norm)
     # Formula: sqrt(sum(error_norm_i^2)) for all parameters
-    total_error_squared = sum(
-        metrics["quant_error_norm"]
-        for metrics in param_metrics.values()
-    )
+    total_error_squared = sum(metrics["quant_error_norm"] for metrics in param_metrics.values())
     total_quant_error_norm = torch.sqrt(torch.tensor(total_error_squared)).item()
-    
+
     # 2. Compute weighted average quantization error
     # Weight by number of elements in each parameter to get true average
     total_weighted_error = sum(
-        metrics["avg_quant_error"] * metrics["num_elements"]
-        for metrics in param_metrics.values()
+        metrics["avg_quant_error"] * metrics["num_elements"] for metrics in param_metrics.values()
     )
-    total_elements = sum(
-        metrics["num_elements"]
-        for metrics in param_metrics.values()
-    )
+    total_elements = sum(metrics["num_elements"] for metrics in param_metrics.values())
     avg_quant_error_weighted = total_weighted_error / total_elements if total_elements > 0 else 0.0
-    
+
     num_params = len(param_metrics)
-    
+
     return {
-        "total_quant_error_norm": total_quant_error_norm,     # Like grad_norm
+        "total_quant_error_norm": total_quant_error_norm,  # Like grad_norm
         "avg_quant_error_weighted": avg_quant_error_weighted,  # Average per-element error
         "num_quantized_params": num_params,
         "total_elements": total_elements,
@@ -379,13 +367,13 @@ def scaled_fp8_blockwise(
 def quant_weights(weights, model, quant_config, compute_error_metrics=True):
     """
     Quantize weights to FP8 and optionally compute quantization error metrics.
-    
+
     Args:
         weights: List of (name, tensor) tuples
         model: Model to check which weights should be quantized
         quant_config: Quantization configuration
         compute_error_metrics: Whether to compute and store error metrics
-        
+
     Returns:
         List of quantized weights
     """
@@ -395,20 +383,22 @@ def quant_weights(weights, model, quant_config, compute_error_metrics=True):
     for k, v in weights:
         if "layer.0" in k or "layers.0" in k:
             print(f"Quantizing weight: {k}")
-        if 'input_layernorm.weight' in k or 'post_attention_layernorm.weight' in k:
+        if "input_layernorm.weight" in k or "post_attention_layernorm.weight" in k:
             print(f"  ↑ 放大 ×{scale}: {k}")
             v = v * scale
-        
+
         # 缩小投影层 (÷s)
-        elif any(proj in k for proj in ['q_proj.weight', 'k_proj.weight', 'v_proj.weight',
-                                            'gate_proj.weight', 'up_proj.weight']):
+        elif any(
+            proj in k
+            for proj in ["q_proj.weight", "k_proj.weight", "v_proj.weight", "gate_proj.weight", "up_proj.weight"]
+        ):
             print(f"  ↓ 缩小 ÷{scale}: {k}")
             v = v / scale
 
         if not is_fp8_weight(k, model):
             weights_quantized.append((k, v))
             continue
-        
+
         # Store original weight for error computation
         original_weight = v.to(torch.bfloat16) if compute_error_metrics else None
 
@@ -420,7 +410,7 @@ def quant_weights(weights, model, quant_config, compute_error_metrics=True):
                 weight_block_size=quant_config.weight_block_size,
             )
             param_scale = param_scale.squeeze(-1)
-            
+
             # Compute quantization error metrics
             if compute_error_metrics:
                 try:
@@ -449,7 +439,7 @@ def quant_weights(weights, model, quant_config, compute_error_metrics=True):
             quantized_tensor, scale = scaled_fp8_quant(v)
             # Reshape back to original shape
             quantized_tensor = quantized_tensor.view(original_shape)
-            
+
             # Compute quantization error metrics
             if compute_error_metrics:
                 try:
@@ -472,36 +462,36 @@ def quant_weights(weights, model, quant_config, compute_error_metrics=True):
             scale_k = k.replace(".weight", ".weight_scale")
             scale = scale.view(1)
             weights_quantized.extend([(k, quantized_tensor), (scale_k, scale)])
-    
+
     # Store aggregated metrics in global state
     if compute_error_metrics and param_metrics:
         aggregated = aggregate_quantization_metrics(param_metrics)
         fp8_state.quant_error_stats = aggregated
         logger.info(
-            f"\n{'='*60}\n"
+            f"\n{'=' * 60}\n"
             f"Quantization Summary:\n"
             f"  - Total quantization error norm (like grad_norm): {aggregated['total_quant_error_norm']:.4f}\n"
             f"  - Weighted average quantization error (per-element): {aggregated['avg_quant_error_weighted']:.6f}\n"
             f"  - Number of quantized parameters: {aggregated['num_quantized_params']}\n"
             f"  - Total quantized elements: {aggregated['total_elements']}\n"
-            f"{'='*60}"
+            f"{'=' * 60}"
         )
 
     print(f"Quantization Summary: {aggregated['total_quant_error_norm']:.4f}")
     print(f"Quantization Summary: {aggregated['avg_quant_error_weighted']:.6f}")
     print(f"Quantization Summary: {aggregated['num_quantized_params']}")
     print(f"Quantization Summary: {aggregated['total_elements']}")
-    
+
     return weights_quantized
 
 
 def get_quantization_error_stats():
     """
     Get the quantization error statistics for logging to wandb or other tracking systems.
-    
+
     This function provides metrics analogous to grad_norm that can be logged during training
     to monitor quantization quality.
-    
+
     Returns:
         dict: Dictionary with the following keys suitable for wandb logging:
             - fp8/total_quant_error_norm: Overall quantization error (analogous to grad_norm)
@@ -510,7 +500,7 @@ def get_quantization_error_stats():
                 Formula: sum(avg_error_i * num_elements_i) / sum(num_elements_i)
             - fp8/num_quantized_params: Number of parameters that were quantized
             - fp8/total_elements: Total number of elements across all quantized parameters
-    
+
     Example usage with wandb:
         >>> stats = get_quantization_error_stats()
         >>> wandb.log(stats)
@@ -523,7 +513,7 @@ def get_quantization_error_stats():
     """
     if not fp8_state.quant_error_stats:
         return {}
-    
+
     stats = fp8_state.quant_error_stats
     return {
         "fp8/total_quant_error_norm": stats.get("total_quant_error_norm", 0.0),
@@ -536,7 +526,7 @@ def get_quantization_error_stats():
 def get_per_param_quantization_stats():
     """
     Get detailed per-parameter quantization error statistics.
-    
+
     Returns:
         dict: Dictionary mapping parameter names to their individual error metrics
     """
@@ -548,12 +538,12 @@ def get_per_param_quantization_stats():
 def load_quanted_weights(weights, model_runner, compute_error_metrics=True):
     """
     Load quantized weights into the model and optionally compute error metrics.
-    
+
     Args:
         weights: List of (name, tensor) tuples
         model_runner: Model runner containing the model and config
         compute_error_metrics: Whether to compute quantization error metrics
-        
+
     Returns:
         Loaded parameters
     """
@@ -603,9 +593,7 @@ def process_weights_after_loading(self, layer) -> None:
         custom_param_dir = dir(custom_param)
         # Find the attributes that are unique to the custom parameter
         custom_attributes = [
-            attr
-            for attr in custom_param_dir
-            if attr not in base_param_dir and not attr.startswith("__")
+            attr for attr in custom_param_dir if attr not in base_param_dir and not attr.startswith("__")
         ]
         # Set the custom attributes into the base parameter object
         for attr in custom_attributes:
@@ -614,11 +602,7 @@ def process_weights_after_loading(self, layer) -> None:
         param.subclass_type = type(custom_param)
         return param
 
-    weight_scale = (
-        layer.weight_scale_inv
-        if hasattr(layer, "weight_scale_inv")
-        else layer.weight_scale
-    )
+    weight_scale = layer.weight_scale_inv if hasattr(layer, "weight_scale_inv") else layer.weight_scale
     weight, weight_scale = process_fp8_weight_block_strategy(layer.weight, weight_scale)
 
     layer.weight = _create_param_from_subclass_attributes(
@@ -641,6 +625,7 @@ def process_weights_after_loading(self, layer) -> None:
     del layer.weight_scale_inv
 
     maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
+
 
 def process_weights_after_loading_moe(self, layer) -> None:
     """This function is used to process the weights after loading for a FusedMoE layer.
@@ -670,21 +655,15 @@ def process_weights_after_loading_moe(self, layer) -> None:
 
     if self.flashinfer_moe_backend is not None:
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-        layer.w13_weight_scale_inv.data = swap_w13_to_w31(
-            layer.w13_weight_scale_inv.data
-        )
+        layer.w13_weight_scale_inv.data = swap_w13_to_w31(layer.w13_weight_scale_inv.data)
 
     # DeepGemm scales need to be transposed and aligned. We try to do
     # it ahead of time for performance reasons.
     if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
         if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                layer.w13_weight_scale_inv
-            )
+            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
         if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                layer.w2_weight_scale_inv
-            )
+            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
     if is_deep_gemm_e8m0_used():
         assert layer.weight_block_size is not None
@@ -703,13 +682,9 @@ def process_weights_after_loading_moe(self, layer) -> None:
 
         # Ensure column-major TMA alignment expected by DeepGEMM.
         if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                layer.w13_weight_scale_inv
-            )
+            layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv)
         if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                layer.w2_weight_scale_inv
-            )
+            layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv)
 
 
 def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor] = None) -> torch.Tensor:

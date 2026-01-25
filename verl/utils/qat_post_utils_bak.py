@@ -13,18 +13,17 @@
 # limitations under the License.
 """Quantization weight post-processor for QAT models - supports bridge and native modes."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
 import torch
 
 from modelopt.torch.export.quant_utils import (
-    QUANTIZATION_FP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     get_quantization_format,
-    to_quantized_weight,
     get_weight_block_size,
+    to_quantized_weight,
 )
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from verl.utils.megatron_utils import unwrap_model
@@ -66,7 +65,7 @@ class QATWeightPostProcessor:
     Note on EP (Expert Parallelism):
         - When EP is enabled, each rank only holds a subset of experts (local_experts)
         - We synchronize metadata across all EP ranks to ensure complete metadata for all experts
-        - Global 
+        - Global
     """
 
     def __init__(
@@ -104,22 +103,22 @@ class QATWeightPostProcessor:
     def _get_ep_info(self) -> tuple[int, int, Any]:
         """
         Get Expert Parallel information from Megatron parallel state.
-        
+
         Returns:
             (ep_size, ep_rank, ep_group): EP world size, rank, and process group
         """
         try:
             from megatron.core import parallel_state as mpu
+
             ep_size = mpu.get_expert_model_parallel_world_size()
             if ep_size > 1:
                 ep_rank = mpu.get_expert_model_parallel_rank()
                 ep_group = mpu.get_expert_model_parallel_group()
                 return ep_size, ep_rank, ep_group
-        except Exception as e:
+        except Exception:
             # EP not enabled or mpu not available
             pass
         return 1, 0, None
-
 
     def _build_quantization_metadata(self):
         """
@@ -127,7 +126,6 @@ class QATWeightPostProcessor:
         Stores: {param_name: QuantizationMetadata}
         """
 
-       
         for vpp_idx, module in enumerate(self.actor_module):
             model = unwrap_model(module)
 
@@ -152,7 +150,6 @@ class QATWeightPostProcessor:
                 if input_quantizer is not None and hasattr(input_quantizer, "_amax"):
                     input_amax = input_quantizer._amax.clone().cpu() if input_quantizer._amax is not None else None
 
-
                 metadata = QuantizationMetadata(
                     qformat=qformat,
                     weight_quantizer=weight_quantizer,
@@ -164,7 +161,6 @@ class QATWeightPostProcessor:
                     input_amax=input_amax,
                     is_local=True,
                 )
-
 
                 for param_name, _ in submodule.named_parameters(recurse=False):
                     full_name = f"{name}.{param_name}" if name else param_name
@@ -178,16 +174,18 @@ class QATWeightPostProcessor:
         # Log sample parameters from layer 0 for debugging
         for name, metadata in self.quant_metadata.items():
             if "layers.0" in name and "weight" in name:
-                print(f"[QAT PostProcessor] Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}")
+                print(
+                    f"[QAT PostProcessor] Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}"
+                )
 
     def _sync_quantization_metadata_across_ep(self):
         """
         Synchronize quantization metadata across all EP (Expert Parallel) ranks.
-        
+
         When EP is enabled, each rank only holds metadata for its local experts.
         This method gathers metadata from all EP ranks and merges them so that
         every rank has complete metadata for all experts.
-        
+
         For non-local experts (experts on other EP ranks):
         - module, weight_quantizer, input_quantizer will be None
         - weight_amax and input_amax will be available for quantization
@@ -195,7 +193,7 @@ class QATWeightPostProcessor:
         """
         if self.ep_size <= 1 or self.ep_group is None:
             return
-        
+
         # Prepare serializable metadata info for all_gather
         # We can't send module/quantizer objects, so we extract necessary info
         local_metadata_info = {}
@@ -203,7 +201,7 @@ class QATWeightPostProcessor:
             # Only sync MoE expert metadata (containing "local_experts" or "experts")
             if "local_experts" not in name and "experts" not in name:
                 continue
-            
+
             local_metadata_info[name] = {
                 "qformat": metadata.qformat,
                 "block_size": metadata.block_size,
@@ -211,36 +209,32 @@ class QATWeightPostProcessor:
                 "weight_amax": metadata.weight_amax,
                 "input_amax": metadata.input_amax,
             }
-        
+
         # Gather metadata from all EP ranks
         all_metadata_info = [None] * self.ep_size
-        torch.distributed.all_gather_object(
-            all_metadata_info, 
-            local_metadata_info, 
-            group=self.ep_group
-        )
-        
+        torch.distributed.all_gather_object(all_metadata_info, local_metadata_info, group=self.ep_group)
+
         # Merge metadata from all ranks
         for rank_idx, rank_metadata in enumerate(all_metadata_info):
             if rank_idx == self.ep_rank:
                 # Skip local metadata (already have it)
                 continue
-            
+
             if rank_metadata is None:
                 continue
-                
+
             for name, info in rank_metadata.items():
                 if name in self.quant_metadata:
                     # Already have this metadata (shouldn't happen with proper global indices)
                     continue
-                
+
                 # Create metadata entry for non-local experts
                 # Note: module and quantizers are not available for non-local experts
                 metadata = QuantizationMetadata(
                     qformat=info["qformat"],
                     weight_quantizer=None,  # Not available for non-local
-                    input_quantizer=None,   # Not available for non-local
-                    module=None,            # Not available for non-local
+                    input_quantizer=None,  # Not available for non-local
+                    module=None,  # Not available for non-local
                     vpp_idx=info["vpp_idx"],
                     block_size=info["block_size"],
                     weight_amax=info["weight_amax"],
@@ -248,12 +242,12 @@ class QATWeightPostProcessor:
                     is_local=False,  # Mark as non-local
                 )
                 self.quant_metadata[name] = metadata
-        
+
         if torch.distributed.get_rank() == 0:
-            print(f"[QAT PostProcessor] EP metadata sync complete. "
-                  f"EP size: {self.ep_size}, Total metadata entries: {len(self.quant_metadata)}")
-
-
+            print(
+                f"[QAT PostProcessor] EP metadata sync complete. "
+                f"EP size: {self.ep_size}, Total metadata entries: {len(self.quant_metadata)}"
+            )
 
     def _find_matching_metadata(self, param_name: str) -> QuantizationMetadata | None:
         """

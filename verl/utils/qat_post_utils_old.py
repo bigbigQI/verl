@@ -22,8 +22,8 @@ from modelopt.torch.export.quant_utils import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     get_quantization_format,
-    to_quantized_weight,
     get_weight_block_size,
+    to_quantized_weight,
 )
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from verl.utils.megatron_utils import unwrap_model
@@ -259,8 +259,9 @@ class QATWeightPostProcessor:
         # Log sample parameters from layer 0 for debugging
         for name, metadata in self.quant_metadata.items():
             if "layers.0" in name and "weight" in name:
-                print(f"[QAT PostProcessor] Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}, module type: {type(metadata.module)}")
-
+                print(
+                    f"[QAT PostProcessor] Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}, module type: {type(metadata.module)}"
+                )
 
     def _log_initialization_info(self):
         """Log initialization information for debugging."""
@@ -274,15 +275,20 @@ class QATWeightPostProcessor:
                 if "local_experts" in name:
                     moe_expert_count += 1
                     if moe_expert_count <= 2:  # Only log first 2 experts
-                        print(f"[QAT PostProcessor] MoE Expert Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}")
+                        print(
+                            f"[QAT PostProcessor] MoE Expert Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}"
+                        )
                 elif "shared_experts" in name:
-                    print(f"[QAT PostProcessor] Shared Expert Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}")
+                    print(
+                        f"[QAT PostProcessor] Shared Expert Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}"
+                    )
                 else:
-                    print(f"[QAT PostProcessor] Dense Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}, module type: {type(metadata.module)}")
+                    print(
+                        f"[QAT PostProcessor] Dense Sample: {name}, qformat={metadata.qformat}, block_size={metadata.block_size}, module type: {type(metadata.module)}"
+                    )
 
         if moe_expert_count > 0:
             print(f"[QAT PostProcessor] Total MoE expert layers in layer 0: {moe_expert_count}")
-
 
     def _find_matching_metadata(self, param_name: str) -> QuantizationMetadata | None:
         """
@@ -572,8 +578,6 @@ class QATWeightPostProcessor:
 
         return None
 
-
-
     def _find_matching_metadata_by_hf_name(self, hf_name: str) -> QuantizationMetadata | None:
         """
         Find matching quantization metadata for an HF-format parameter name.
@@ -632,13 +636,9 @@ class QATWeightPostProcessor:
             elif "shared_expert" in hf_name:
                 # Shared expert patterns (Qwen2Moe, DeepSeekV3, etc.)
                 if any(proj in hf_name for proj in ["gate_proj", "up_proj"]):
-                    mcore_patterns.append(
-                        f"decoder.layers.{layer_num}.mlp.shared_experts.linear_fc1.weight"
-                    )
+                    mcore_patterns.append(f"decoder.layers.{layer_num}.mlp.shared_experts.linear_fc1.weight")
                 elif "down_proj" in hf_name:
-                    mcore_patterns.append(
-                        f"decoder.layers.{layer_num}.mlp.shared_experts.linear_fc2.weight"
-                    )
+                    mcore_patterns.append(f"decoder.layers.{layer_num}.mlp.shared_experts.linear_fc2.weight")
             elif "gate.weight" in hf_name:
                 # MoE router gate
                 mcore_patterns.append(f"decoder.layers.{layer_num}.mlp.router.weight")
