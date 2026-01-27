@@ -278,7 +278,6 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     we use weight.t() which gives [K, N] column-major (as required by cuBLAS).
     """
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_quantize,
     )
     from vllm.model_executor.utils import replace_parameter
