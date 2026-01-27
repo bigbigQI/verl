@@ -277,6 +277,10 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     Weight is stored as [N, K] row-major. When passed to _scaled_mm,
     we use weight.t() which gives [K, N] column-major (as required by cuBLAS).
     """
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_quantize,
+    )
+    from torch.nn import Parameter
     def _create_param_from_subclass_attributes(custom_data, custom_weight):
         param = Parameter(custom_data, requires_grad=False)
         base_param_dir = dir(torch.nn.Parameter)
@@ -300,7 +304,8 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     weight_fp8, w_scale_blocked = mxfp8_quantize(weight)
 
     layer.weight = _create_param_from_subclass_attributes(weight_fp8, layer.weight)
-    layer.weight_scale = _create_param_from_subclass_attributes(w_scale_blocked, layer.weight_scale)
+    # layer.weight_scale = _create_param_from_subclass_attributes(w_scale_blocked, layer.weight_scale)
+    layer.weight_scale = torch.nn.Parameter(w_scale_blocked, requires_grad=False)
 
     layer.orig_dtype = layer.orig_dtype
 
@@ -317,7 +322,7 @@ def apply_vllm_mxfp8_patches():
     
     # Try to patch MXFP8 specific methods if available
     try:
-        func1_path = "vllm.model_executor.layers.quantization.mxfp8.MXFp8LinearMethod.process_weights_after_loading"
+        func1_path = "vllm.model_executor.layers.quantization.mxfp8.Mxfp8LinearMethod.process_weights_after_loading"
         patcher1 = patch(func1_path, process_weights_after_loading_for_mxfp8)
         patcher1.start()
         mxfp8_state.vllm_patches.append(patcher1)
