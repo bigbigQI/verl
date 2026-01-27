@@ -280,34 +280,31 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_quantize,
     )
+    from vllm.model_executor.utils import replace_parameter
     from torch.nn import Parameter
-    def _create_param_from_subclass_attributes(custom_data, custom_weight):
-        param = Parameter(custom_data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_weight_dir = dir(custom_weight)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_weight, attr))
-
-        return param
-
     weight = layer.weight.data
-
     # Ensure weight is contiguous before quantization
     weight = weight.contiguous()
 
     # Quantize weight to MXFP8 format with swizzled scale layout
     weight_fp8, w_scale_blocked = mxfp8_quantize(weight)
 
-    layer.weight = _create_param_from_subclass_attributes(weight_fp8, layer.weight)
-    # layer.weight_scale = _create_param_from_subclass_attributes(w_scale_blocked, layer.weight_scale)
-    layer.weight_scale = torch.nn.Parameter(w_scale_blocked, requires_grad=False)
-
-    layer.orig_dtype = layer.orig_dtype
+    # Check if this is a reload (weight_scale already exists) or first load
+    is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
+    
+    if is_reload:
+        # Reload case: update existing parameters in-place for cudagraph compatibility
+        with torch.no_grad():
+            layer.weight.data.copy_(weight_fp8)
+            layer.weight_scale.data.copy_(w_scale_blocked)
+    else:
+        # First load: create new parameters
+        layer.weight = Parameter(weight_fp8, requires_grad=False)
+        layer.weight_scale = Parameter(w_scale_blocked, requires_grad=False)
+    
+    # Preserve orig_dtype
+    if not hasattr(layer, 'orig_dtype'):
+        layer.orig_dtype = torch.bfloat16
 
 
 
