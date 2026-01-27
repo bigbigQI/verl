@@ -290,26 +290,26 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     weight_fp8, w_scale_blocked = mxfp8_quantize(weight)
 
     # Check if this is a reload (weight_scale already exists) or first load
-    is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
+    # is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
 
-    print(f"is_reload: {is_reload}")
+    # print(f"is_reload: {is_reload}")
     
-    if is_reload:
-        # Reload case: update existing parameters in-place for cudagraph compatibility
-        with torch.no_grad():
-            layer.weight.data.copy_(weight_fp8)
-            layer.weight_scale.data.copy_(w_scale_blocked)
-    else:
+    # if is_reload:
+    #     # Reload case: update existing parameters in-place for cudagraph compatibility
+    #     with torch.no_grad():
+    #         layer.weight.data.copy_(weight_fp8)
+    #         layer.weight_scale.data.copy_(w_scale_blocked)
+    # else:
         
         # First load: create new parameters
-        replace_parameter(layer, "weight", weight_fp8)
-        replace_parameter(layer, "weight_scale", w_scale_blocked)
+    replace_parameter(layer, "weight", weight_fp8)
+    replace_parameter(layer, "weight_scale", w_scale_blocked)
         # layer.weight = Parameter(weight_fp8, requires_grad=False)
         # layer.weight_scale = Parameter(w_scale_blocked, requires_grad=False)
     
     # Preserve orig_dtype
-    if not hasattr(layer, 'orig_dtype'):
-        layer.orig_dtype = torch.bfloat16
+    # if not hasattr(layer, 'orig_dtype'):
+    layer.orig_dtype = torch.bfloat16
 
 
 
