@@ -12,6 +12,9 @@ import os
 
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
+from verl.utils.vllm.vllm_mxfp8_utils import apply_vllm_mxfp8_patches
+apply_vllm_mxfp8_patches()
+
 import torch
 from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
