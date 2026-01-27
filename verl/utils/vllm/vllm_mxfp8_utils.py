@@ -313,7 +313,7 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
 
         return param
     layer.weight = _create_param_from_subclass_attributes(weight_fp8, layer.weight)
-    if layer.weight_scale is not None:
+    if hasattr(layer, 'weight_scale') and layer.weight_scale is not None:
         layer.weight_scale = _create_param_from_subclass_attributes(w_scale_blocked, layer.weight_scale)
     else:
         layer.weight_scale = torch.nn.Parameter(w_scale_blocked, requires_grad=False)
