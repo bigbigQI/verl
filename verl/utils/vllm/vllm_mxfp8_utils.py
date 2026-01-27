@@ -290,20 +290,32 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     weight_fp8, w_scale_blocked = mxfp8_quantize(weight)
 
     # Check if this is a reload (weight_scale already exists) or first load
-    # is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
+    is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
 
-    # print(f"is_reload: {is_reload}")
+    print(f"is_reload: {is_reload}")
     
-    # if is_reload:
-    #     # Reload case: update existing parameters in-place for cudagraph compatibility
-    #     with torch.no_grad():
-    #         layer.weight.data.copy_(weight_fp8)
-    #         layer.weight_scale.data.copy_(w_scale_blocked)
-    # else:
+    if is_reload:
+        # Reload case: update existing parameters in-place for cudagraph compatibility
+        def _create_param_from_subclass_attributes(custom_data, custom_weight):
+            param = Parameter(custom_data, requires_grad=False)
+            base_param_dir = dir(torch.nn.Parameter)
+            custom_weight_dir = dir(custom_weight)
+            # Find the attributes that are unique to the custom parameter
+            custom_attributes = [
+                attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
+            ]
+            # Set the custom attributes into the base parameter object
+            for attr in custom_attributes:
+                setattr(param, attr, getattr(custom_weight, attr))
+
+            return param
+        layer.weight = _create_param_from_subclass_attributes(weight_fp8, layer.weight)
+        layer.weight_scale = _create_param_from_subclass_attributes(w_scale_blocked, layer.weight_scale)
+    else:
         
         # First load: create new parameters
-    replace_parameter(layer, "weight", weight_fp8)
-    replace_parameter(layer, "weight_scale", w_scale_blocked)
+        replace_parameter(layer, "weight", weight_fp8)
+        replace_parameter(layer, "weight_scale", w_scale_blocked)
         # layer.weight = Parameter(weight_fp8, requires_grad=False)
         # layer.weight_scale = Parameter(w_scale_blocked, requires_grad=False)
     
