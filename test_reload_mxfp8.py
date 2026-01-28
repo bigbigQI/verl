@@ -62,6 +62,10 @@ def reload_weights_with_mxfp8_quant(llm, weights):
         model_runner = llm.llm_engine.engine_core.model_executor.driver_worker.model_runner
     model = model_runner.model
     model.load_weights(weights)
+    for name, param in model.named_parameters():
+        if "layers.0" in name and "weight" in name:
+            print(f"After reload: Name: {name}, dtype: {param.dtype}, data: {param[:4]}")
+    
     return weights
 
 
@@ -91,8 +95,7 @@ def main():
     model = model_runner.model
     for name, param in model.named_parameters():
         if "layers.0" in name and "weight" in name:
-            print(f"Name: {name}, Shape: {param.shape}, dtype: {param.dtype}")
-            break
+            print(f"Name: {name}, dtype: {param.dtype}, data: {param[:4]}")
     
     # Setup inference
     prompt = "Hello, my name is"
