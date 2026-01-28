@@ -76,12 +76,20 @@ def main():
     print("Step 1: Initialize vLLM with MXFP8 quantization")
     print("=" * 80)
     
+
+    MXFP8_BLOCK_QUANT_KWARGS = {
+        "activation_scheme": "dynamic",
+        "fmt": "e4m3",
+        "quant_method": "mxfp8",
+        "weight_block_size": [1, 32],  # MXFP8 uses 1x32 blocks with E8M0 scale
+    }
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
         quantization="mxfp8",
         enable_sleep_mode=True,  # Enable sleep mode for testing
         enforce_eager=True,
+        hf_overrides={"quantization_config": MXFP8_BLOCK_QUANT_KWARGS},
         
     )
     
