@@ -222,7 +222,7 @@ class vLLMColocateWorkerExtension:
                 loaded_params = load_quanted_weights(weights, self.model_runner)
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
-                logger.info("Loading standard weights (non-FP8, async)")
+                logger.info("Loading standard weights (non-FP8/MXFP8, async)")
                 self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:

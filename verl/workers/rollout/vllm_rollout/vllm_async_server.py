@@ -225,7 +225,7 @@ class vLLMHttpServer:
         quantization = self.config.quantization
 
         if quantization is not None:
-            _SUPPORTED_QUANTIZATION = ["fp8", "torchao"]
+            _SUPPORTED_QUANTIZATION = ["fp8", "mxfp8", "torchao"]
             if quantization not in _SUPPORTED_QUANTIZATION:
                 raise ValueError(f"Currently only support {_SUPPORTED_QUANTIZATION} quantization, got: {quantization}")
 
