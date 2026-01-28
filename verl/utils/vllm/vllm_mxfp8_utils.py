@@ -291,6 +291,7 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
 
     # Quantize weight to MXFP8 format with swizzled scale layout
     weight_fp8, w_scale_blocked = mxfp8_quantize(weight)
+    print(f"weight_fp8: {weight_fp8[:4]}, original weight: {weight[:4]}")
 
     # Check if this is a reload (weight_scale already exists) or first load
     is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
