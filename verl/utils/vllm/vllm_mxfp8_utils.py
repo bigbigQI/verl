@@ -283,9 +283,6 @@ def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     from vllm.model_executor.utils import replace_parameter
     from torch.nn import Parameter
     weight = layer.weight.data
-
-    if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
     # Ensure weight is contiguous before quantization
     weight = weight.contiguous()
 
