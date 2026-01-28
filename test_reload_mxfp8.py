@@ -81,6 +81,8 @@ def main():
         trust_remote_code=True,
         quantization="mxfp8",
         enable_sleep_mode=True,  # Enable sleep mode for testing
+        enforce_eager=True,
+        
     )
     
     # Print some model info

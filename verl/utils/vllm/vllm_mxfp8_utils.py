@@ -269,64 +269,64 @@ def load_quanted_weights(weights, model_runner):
 
 def process_weights_after_loading_for_mxfp8(self, layer) -> None:
     """Quantize weights to MXFP8 format after loading.
-
-    Converts weights from original dtype to torch.float8_e4m3fn with
-    block-wise torch.float8_e8m0fnu scale factors. Weight scales are
-    pre-converted to cuBLAS blocked layout for efficient runtime usage.
-
-    Weight is stored as [N, K] row-major. When passed to _scaled_mm,
-    we use weight.t() which gives [K, N] column-major (as required by cuBLAS).
+    
+    Supports both first-time loading and weight reloading.
     """
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_quantize,
     )
     from vllm.model_executor.utils import replace_parameter
-    from torch.nn import Parameter
-    weight = layer.weight.data
-
+    
+    # Skip if already processed (normal vLLM flow will call this)
     if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-    # Ensure weight is contiguous before quantization
+        return
+    
+    # Check if this is a reload case (weight is already fp8)
+    is_reload = layer.weight.dtype == torch.float8_e4m3fn
+    
+    if is_reload:
+        # For reload: the weight should already be bf16 at this point
+        # (restored by the weight loading mechanism)
+        # If it's still fp8, we have a problem - the bf16 reload didn't happen
+        raise RuntimeError(
+            "Weight reload detected but layer.weight is still fp8. "
+            "Ensure bf16 weights are properly restored before quantization."
+        )
+    
+    weight = layer.weight.data
+    
+    # Ensure weight is contiguous and bf16 before quantization
+    if weight.dtype != torch.bfloat16:
+        raise ValueError(f"Expected bfloat16 weight, got {weight.dtype}")
     weight = weight.contiguous()
-
+    
     # Quantize weight to MXFP8 format with swizzled scale layout
     weight_fp8, w_scale_blocked = mxfp8_quantize(weight)
-
-    # Check if this is a reload (weight_scale already exists) or first load
-    is_reload = hasattr(layer, 'weight_scale') and layer.weight_scale is not None
-
-    print(f"is_reload: {is_reload}")
     
-    # if is_reload:
-    #     # Reload case: update existing parameters in-place for cudagraph compatibility
-    def _create_param_from_subclass_attributes(custom_data, custom_weight):
-        param = Parameter(custom_data, requires_grad=False)
-        base_param_dir = dir(torch.nn.Parameter)
-        custom_weight_dir = dir(custom_weight)
-        # Find the attributes that are unique to the custom parameter
-        custom_attributes = [
-            attr for attr in custom_weight_dir if attr not in base_param_dir and not attr.startswith("__")
-        ]
-        # Set the custom attributes into the base parameter object
-        for attr in custom_attributes:
-            setattr(param, attr, getattr(custom_weight, attr))
-
-        return param
-    layer.weight = _create_param_from_subclass_attributes(weight_fp8, layer.weight)
-    if hasattr(layer, 'weight_scale') and layer.weight_scale is not None:
-        layer.weight_scale = _create_param_from_subclass_attributes(w_scale_blocked, layer.weight_scale)
+    # Check if we have original quantized params to update (for cuDAGraph compat)
+    original_weight = getattr(layer, '_original_quantized_weight', None)
+    original_weight_scale = getattr(layer, '_original_quantized_weight_scale', None)
+    
+    if original_weight is not None and original_weight_scale is not None:
+        # Reload case with cuDAGraph: copy data to original tensors
+        with torch.no_grad():
+            original_weight.copy_(weight_fp8)
+            original_weight_scale.copy_(w_scale_blocked)
+        layer.weight = original_weight
+        layer.weight_scale = original_weight_scale
     else:
-        layer.weight_scale = torch.nn.Parameter(w_scale_blocked, requires_grad=False)
-    # else:
+        # First load case: use replace_parameter to preserve weight_loader
+        replace_parameter(layer, "weight", weight_fp8)
         
-        # First load: create new parameters
-    # replace_parameter(layer, "weight", weight_fp8)
-    # replace_parameter(layer, "weight_scale", w_scale_blocked)
-        # layer.weight = Parameter(weight_fp8, requires_grad=False)
-        # layer.weight_scale = Parameter(w_scale_blocked, requires_grad=False)
+        if hasattr(layer, 'weight_scale') and layer.weight_scale is not None:
+            replace_parameter(layer, "weight_scale", w_scale_blocked)
+        else:
+            layer.weight_scale = torch.nn.Parameter(w_scale_blocked, requires_grad=False)
+        
+        # Save references for cuDAGraph-compatible reload later
+        layer._original_quantized_weight = layer.weight
+        layer._original_quantized_weight_scale = layer.weight_scale
     
-    # Preserve orig_dtype
-    # if not hasattr(layer, 'orig_dtype'):
     layer.orig_dtype = torch.bfloat16
 
 
