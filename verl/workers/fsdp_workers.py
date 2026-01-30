@@ -751,16 +751,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             await self.rollout.update_weights(per_tensor_base_params, base_sync_done=False)
             del base_model_params, per_tensor_base_params
 
-        weights = list(per_tensor_base_params)
-        rank = torch.distributed.get_rank()
-        state_dict = {}
-        for name, weight in weights:
-            state_dict[name] = weight.data.cpu()
-        path = f"/apps/quant_models/qwen3_8b/model_rank_{rank}.pt"
-        torch.save(state_dict, path)
-        del state_dict
-        print(f"[lark]: saved state_dict to {path}")
-
         await self.rollout.update_weights(per_tensor_param, peft_config=peft_config, base_sync_done=self.base_sync_done)
         log_gpu_memory_usage("After update_weights", logger=logger)
         del params, per_tensor_param
