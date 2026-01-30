@@ -4,9 +4,11 @@ import os
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 llm = LLM(
-    model="Qwen/Qwen3-8B-Base",
+    # model="Qwen/Qwen3-8B-Base",
+    model="/apps/quant_models/qwen3_8b",
     trust_remote_code=True,
     quantization="mxfp8",
+    load_format="pt",
     enable_sleep_mode=True,  # 启用 sleep mode 用于测试
 )
 

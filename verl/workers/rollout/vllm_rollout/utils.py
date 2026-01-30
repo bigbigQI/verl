@@ -223,17 +223,16 @@ class vLLMColocateWorkerExtension:
                 logger.info(f"FP8 weights loaded (async), loaded_params: {len(loaded_params)}")
             else:
                 logger.info("Loading standard weights (non-FP8/MXFP8, async)")
-                weights = list(weights)
-                rank = torch.distributed.get_rank()
-                state_dict = {}
-                for name, weight in weights:
-                    state_dict[name] = weight.data.cpu()
-                path = f"/apps/quant_models/qwen3_8b/model_rank_{rank}.pt"
-                torch.save(state_dict, path)
-                del state_dict
-                print(f"[lark]: saved state_dict to {path}")
-                import time 
-                time.sleep(1000)
+                # weights = list(weights)
+                # rank = torch.distributed.get_rank()
+                # state_dict = {}
+                # for name, weight in weights:
+                #     state_dict[name] = weight.data.cpu()
+                # path = f"/apps/quant_models/qwen3_8b/model_rank_{rank}.pt"
+                # torch.save(state_dict, path)
+                # del state_dict
+                # print(f"[lark]: saved state_dict to {path}")
+                self.model_runner.model.load_weights(weights)
 
     def _get_zmq_handle(self) -> str:
         """Get ZMQ handle for communication."""

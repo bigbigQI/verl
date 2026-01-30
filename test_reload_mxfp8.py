@@ -79,6 +79,8 @@ def main():
         quantization="mxfp8",
         enable_sleep_mode=True,  # Enable sleep mode for testing
         load_format="dummy",
+        worker_extension_cls="verl.workers.rollout.vllm_rollout.utils.vLLMColocateWorkerExtension",
+        distributed_executor_backend="mp",
     )
     
     # Print some model info
