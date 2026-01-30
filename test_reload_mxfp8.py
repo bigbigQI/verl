@@ -12,9 +12,6 @@ import os
 
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
-from verl.utils.vllm.vllm_mxfp8_utils import apply_vllm_mxfp8_patches
-apply_vllm_mxfp8_patches()
-
 import torch
 from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
@@ -76,21 +73,12 @@ def main():
     print("Step 1: Initialize vLLM with MXFP8 quantization")
     print("=" * 80)
     
-
-    MXFP8_BLOCK_QUANT_KWARGS = {
-        "activation_scheme": "dynamic",
-        "fmt": "e4m3",
-        "quant_method": "mxfp8",
-        "weight_block_size": [1, 32],  # MXFP8 uses 1x32 blocks with E8M0 scale
-    }
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
         quantization="mxfp8",
         enable_sleep_mode=True,  # Enable sleep mode for testing
-        enforce_eager=True,
-        hf_overrides={"quantization_config": MXFP8_BLOCK_QUANT_KWARGS},
-        
+        load_format="dummy",
     )
     
     # Print some model info
@@ -106,6 +94,9 @@ def main():
     for name, param in model.named_parameters():
         if "layers.0" in name and "weight" in name:
             print(f"Name: {name}, dtype: {param.dtype}, data: {param[:4]}")
+
+    from verl.utils.vllm.vllm_fp8_utils import is_fp8_model
+    print(is_fp8_model(model_runner.vllm_config))
     
     # Setup inference
     prompt = "Hello, my name is"
