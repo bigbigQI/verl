@@ -204,6 +204,7 @@ class ServerAdapter(BaseRollout):
             weights = quant_weights_by_name(
                 weights,
                 self.model_config.hf_config.quantization_config,
+                dtype=self.model_config.hf_config.dtype,
             )
         else:
             weights = weights

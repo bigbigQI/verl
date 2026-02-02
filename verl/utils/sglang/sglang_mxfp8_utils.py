@@ -117,7 +117,7 @@ def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
                 v = v.contiguous()
                 assert v.shape[-1] % 32 ==0, f"v.shape[-1] {v.shape[-1]} must be a multiple of 32"
 
-                param_lp, param_scale = mxfp8_group_quantize(v)
+                param_lp, param_scale = mxfp8_group_quantize(v.to(dtype))
                 param_lp = param_lp.view_as(v)
                 param_scale = param_scale.view(*v.shape[:-1], v.shape[-1] // 32).contiguous()
                 weights_quantized.append([k, param_lp])
