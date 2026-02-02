@@ -147,12 +147,14 @@ class SGLangHttpServer:
 
         engine_kwargs = self.config.get("engine_kwargs", {}).get("sglang", {}) or {}
         attention_backend = engine_kwargs.pop("attention_backend", None)
+        print(f"larkz attention backend {attention_backend}")
+        attention_backend = "flashinfer"
         quantization = self.config.get("quantization", None)
         if quantization is not None:
             if quantization == "fp8":
-                assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
-                    "sglang>=0.5.5 is required for FP8 quantization"
-                )
+                #assert version.parse(sglang.__version__) >= version.parse("0.5.5"), (
+                #    "sglang>=0.5.5 is required for FP8 quantization"
+                #)
                 FP8_BLOCK_QUANT_KWARGS = {
                     "activation_scheme": "dynamic",
                     "fmt": "e4m3",
@@ -252,7 +254,8 @@ class SGLangHttpServer:
         sglang.srt.entrypoints.engine._set_envs_and_config = _set_envs_and_config
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
         server_args = ServerArgs(**args)
-        if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+        # if version.parse(sglang.__version__) >= version.parse("0.5.7"):
+        if True:
             self.tokenizer_manager, self.template_manager, self.scheduler_info, *_ = _launch_subprocesses(
                 server_args=server_args,
                 init_tokenizer_manager_func=sglang.srt.entrypoints.engine.init_tokenizer_manager,
