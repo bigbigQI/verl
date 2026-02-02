@@ -114,6 +114,16 @@ class ServerAdapter(BaseRollout):
             }
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+        elif config.get("quantization", None) == "mxfp8":
+            MXFP8_BLOCK_QUANT_KWARGS = {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "mxfp8",
+                "weight_block_size": [1, 32],
+                "scale_fmt": "ue8m0",
+            }
+            mxfp8_block_quant_kwargs = dict(MXFP8_BLOCK_QUANT_KWARGS)
+            model_config.hf_config.quantization_config = mxfp8_block_quant_kwargs
         super().__init__(config, model_config, device_mesh)
         self._engine: AsyncHttpServerAdapter = None
 
@@ -186,6 +196,14 @@ class ServerAdapter(BaseRollout):
                 weights,
                 self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
+            )
+        elif self.config.get("quantization", None) == "mxfp8":
+            from verl.utils.sglang.sglang_mxfp8_utils import quant_weights_by_name
+
+            logger.info("Convert bf16 weights to mxfp8 format before loading")
+            weights = quant_weights_by_name(
+                weights,
+                self.model_config.hf_config.quantization_config,
             )
         else:
             weights = weights

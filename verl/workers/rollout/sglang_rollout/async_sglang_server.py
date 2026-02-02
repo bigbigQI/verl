@@ -160,6 +160,15 @@ class SGLangHttpServer:
                     "weight_block_size": [128, 128],
                 }
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+            elif quantization == "mxfp8":
+                MXFP8_BLOCK_QUANT_KWARGS = {
+                    "activation_scheme": "dynamic",
+                    "fmt": "e4m3",
+                    "quant_method": "mxfp8",
+                    "weight_block_size": [1, 32],
+                    "scale_fmt": "ue8m0",
+                }
+                mxfp8_block_quant_kwargs = dict(MXFP8_BLOCK_QUANT_KWARGS)
             else:
                 raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
         dist_init_addr = (
@@ -168,6 +177,11 @@ class SGLangHttpServer:
             else f"{self._master_address}:{self._master_port}"
         )
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
+        quantization_config = None
+        if quantization == "fp8":
+            quantization_config = fp8_block_quant_kwargs
+        elif quantization == "mxfp8":
+            quantization_config = mxfp8_block_quant_kwargs
         args = {
             "model_path": self.model_config.local_path,
             "dtype": self.config.dtype,
@@ -191,9 +205,7 @@ class SGLangHttpServer:
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,
-            "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
-            if quantization == "fp8"
-            else json.dumps({}),
+            "json_model_override_args": json.dumps({"quantization_config": quantization_config}) if quantization_config is not None else json.dumps({}),
             **engine_kwargs,
         }
 
