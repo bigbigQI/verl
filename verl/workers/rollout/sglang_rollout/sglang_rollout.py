@@ -206,6 +206,18 @@ class ServerAdapter(BaseRollout):
                 self.model_config.hf_config.quantization_config,
                 dtype=self.model_config.hf_config.dtype,
             )
+            # weights = list(weights)
+            rank = torch.distributed.get_rank()
+            state_dict = {}
+            for name, weight in weights:
+                state_dict[name] = weight.data.cpu()
+            path = f"/apps/quant_models/qwen3_30b/model_rank_{rank}.pt"
+            torch.save(state_dict, path)
+            del state_dict
+            print(f"[lark]: saved state_dict to {path}")
+
+            import time 
+            time.sleep(1000)
         else:
             weights = weights
 
