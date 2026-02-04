@@ -107,17 +107,17 @@ def quant_weights_by_name(weights, quant_config, dtype=torch.bfloat16):
             weights_quantized.append((k, v))
             continue
 
-        # Quantize to FP8
+        # Quantize to MXFP8
         try:
             if weight_block_size is not None:
                 if torch.distributed.get_rank() == 0:
                     logger.debug(f"  Quantizing to MXFP8 blockwise: {k}")
 
                 # assert len(v.shape) == 2, "Only 2d input tensor is supported"
-                v = v.view(-1, v.shape[-1]).contiguous()
-                assert v.shape[-1] % 32 ==0, f"v.shape[-1] {v.shape[-1]} must be a multiple of 32"
+                v_flat = v.view(-1, v.shape[-1]).contiguous()
+                assert v_flat.shape[-1] % 32 ==0, f"v.shape[-1] {v.shape[-1]} must be a multiple of 32"
 
-                param_lp, param_scale = mxfp8_group_quantize(v.to(dtype))
+                param_lp, param_scale = mxfp8_group_quantize(v_flat.to(dtype))
                 param_lp = param_lp.view_as(v)
                 param_scale = param_scale.view(*v.shape[:-1], v.shape[-1] // 32).contiguous()
                 weights_quantized.append([k, param_lp])
