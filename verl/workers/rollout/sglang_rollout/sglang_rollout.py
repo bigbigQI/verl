@@ -207,27 +207,73 @@ class ServerAdapter(BaseRollout):
                 dtype=self.model_config.hf_config.dtype,
             )
             # weights = list(weights)
-            rank = torch.distributed.get_rank()
-            state_dict = {}
-            for name, weight in weights:
-                state_dict[name] = weight.data.cpu()
-            path = f"/apps/quant_models/qwen3_30b/model_rank_{rank}.pt"
-            torch.save(state_dict, path)
-            del state_dict
-            print(f"[lark]: saved state_dict to {path}")
+            # rank = torch.distributed.get_rank()
+            # state_dict = {}
+            # for name, weight in weights:
+            #     state_dict[name] = weight.data.cpu()
+            # path = f"/apps/quant_models/qwen3_30b/model_rank_{rank}.pt"
+            # torch.save(state_dict, path)
+            # del state_dict
+            # print(f"[lark]: saved state_dict to {path}")
 
-            import time 
-            time.sleep(1000)
+            # import time 
+            # time.sleep(1000)
         else:
             weights = weights
 
-        for params_batch in get_named_tensor_buckets(weights, update_weights_bucket_bytes):
-            await sgl_update_weights(
-                engine=self._engine,
-                params_batch=params_batch,
-                device_mesh_key="infer_tp",
-                device_mesh=self.device_mesh,
-            )
+        logger.info("=" * 60)
+        logger.info("Syncing weights to SGLang server")
+        logger.info("=" * 60)
+        
+        # Use iterator with look-ahead to detect the last bucket without loading all into memory
+        bucket_iter = get_named_tensor_buckets(weights, update_weights_bucket_bytes)
+        
+        current_batch = next(bucket_iter)
+        bucket_idx = 0
+        
+        while True:
+            try:
+                # Try to peek the next batch
+                next_batch = next(bucket_iter)
+                # If we got next_batch, current_batch is not the last one
+                is_last_bucket = False
+                
+                logger.info(
+                    f"  Bucket {bucket_idx}: {len(current_batch)} tensors, "
+                    f"first={current_batch[0][0]}, last={current_batch[-1][0]}"
+                )
+                
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=current_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                    run_post_process=is_last_bucket,
+                )
+                
+                # Move to next batch
+                current_batch = next_batch
+                bucket_idx += 1
+                
+            except StopIteration:
+                # No more batches after current_batch, so it's the last one
+                is_last_bucket = True
+                
+                logger.info(
+                    f"  Bucket {bucket_idx}: {len(current_batch)} tensors, "
+                    f"first={current_batch[0][0]}, last={current_batch[-1][0]} (last bucket)"
+                )
+                
+                await sgl_update_weights(
+                    engine=self._engine,
+                    params_batch=current_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=self.device_mesh,
+                    # Trigger post-processing (e.g. MxFP8 MoE scale swizzle) on the last bucket
+                    run_post_process=is_last_bucket,
+                )
+                break
+                    
 
         if self.device_mesh["infer_tp"].get_local_rank() == 0:
             await self._engine.flush_cache()

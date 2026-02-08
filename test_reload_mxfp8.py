@@ -1,360 +1,260 @@
 """
-Test script for MXFP8 reload functionality.
+Standalone test for MXFP8 quantized weight sync with SGLang server.
 
-This script demonstrates:
-1. First load bf16 parameters and online quantize to mxfp8
-2. Perform inference (first time)
-3. Reload bf16 parameters using vLLMColocateWorkerExtension pattern
-4. Online quantize to mxfp8 again
-5. Perform inference (second time)
+Tests the same flow used in the project's sglang rollout (sglang_rollout.py):
+  1. Launch SGLang HTTP server with dummy weights + mxfp8 quantization config
+  2. Load pre-quantized MXFP8 weights from safetensors on disk
+  3. Sync weights to server via sgl_update_weights (same as training loop)
+  4. Verify inference produces meaningful results after sync
 
-Key changes:
-- Uses the vLLMColocateWorkerExtension pattern for weight updates
-- Implements bucket-based weight transfer similar to IPC mode
-- Supports MXFP8 online quantization through vLLM's load_weights
+Usage:
+    # Single GPU (TP=1)
+    python tests/test_sglang_mxfp8_weight_sync.py
+
+    # Custom settings
+    python tests/test_sglang_mxfp8_weight_sync.py --tp-size 1 --port 30000
+
+    # Multi-GPU (TP=4), must init with torchrun
+    torchrun --nproc_per_node=4 tests/test_sglang_mxfp8_weight_sync.py --tp-size 4
 """
-import gc
-import os
-from typing import Generator, TypedDict
 
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+import argparse
+import asyncio
+import json
+import logging
+import multiprocessing as mp
+import os
 
 import torch
-from transformers import AutoModelForCausalLM
-from vllm import LLM, SamplingParams
+import torch.distributed as dist
+from safetensors import safe_open
+from sglang.srt.weight_sync.utils import update_weights as sgl_update_weights
+from torch.distributed.device_mesh import init_device_mesh
+
+from verl.workers.rollout.sglang_rollout.http_server_engine import AsyncHttpServerAdapter
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("test_mxfp8")
+
+# ─── Default Configuration ─────────────────────────────────────────
+MXFP8_MODEL_PATH = "/apps/quant_models/qwen3_30b_mxfp8"
+#MXFP8_MODEL_PATH = "/apps/quant_models/qwen3_8b_mxfp8"
+
+# Same mxfp8 quantization config as in sglang_rollout.py & async_sglang_server.py
+MXFP8_QUANT_CONFIG = {
+    "activation_scheme": "dynamic",
+    "fmt": "e4m3",
+    "quant_method": "mxfp8",
+    "weight_block_size": [1, 32],
+    "scale_fmt": "ue8m0",
+}
+
+BUCKET_BYTES = 256 << 20  # 256 MB per bucket (same scale as project default)
 
 
-class TensorMetadata(TypedDict):
-    """Metadata for a tensor in a weight bucket."""
-    name: str
-    shape: torch.Size
-    dtype: torch.dtype
-    offset: int
+def parse_args():
+    p = argparse.ArgumentParser(description="Test MXFP8 weight sync with SGLang")
+    p.add_argument("--model-path", type=str, default=MXFP8_MODEL_PATH)
+    p.add_argument("--tp-size", type=int, default=1)
+    p.add_argument("--port", type=int, default=30000)
+    p.add_argument("--mem-fraction", type=float, default=0.7)
+    p.add_argument("--bucket-mb", type=int, default=256, help="Weight sync bucket size in MB")
+    return p.parse_args()
 
 
-class MXFP8WeightUpdater:
-    """
-    Weight updater class that mimics vLLMColocateWorkerExtension pattern.
-    
-    This class implements the bucket-based weight update mechanism used in verl
-    for synchronizing weights between training and inference processes.
-    
-    Key features:
-    1. Bucket-based weight batching for memory efficiency
-    2. Support for MXFP8 online quantization via vLLM's load_weights
-    3. Proper memory management with explicit cleanup
-    """
-    
-    def __init__(self, llm: LLM, bucket_size_mb: int = 512):
-        """
-        Initialize the weight updater.
-        
-        Args:
-            llm: The vLLM LLM instance
-            bucket_size_mb: Size of weight bucket in megabytes (default 512MB)
-        """
-        self.llm = llm
-        self.bucket_size = bucket_size_mb << 20  # Convert MB to bytes
-        self._init_model_runner()
-        
-    def _init_model_runner(self):
-        """Initialize model runner reference from LLM engine."""
-        try:
-            self.model_runner = self.llm.llm_engine.model_executor.driver_worker.model_runner
-        except AttributeError:
-            self.model_runner = self.llm.llm_engine.engine_core.model_executor.driver_worker.model_runner
-        self.model = self.model_runner.model
-        self.device = next(self.model.parameters()).device
-        
-    def _get_named_tensor_buckets(
-        self, 
-        weights: list[tuple[str, torch.Tensor]], 
-        target_dtype: torch.dtype = torch.bfloat16
-    ) -> Generator[list[tuple[str, torch.Tensor]], None, None]:
-        """
-        Yield buckets of weights that fit within the bucket size limit.
-        
-        This mimics the bucket-based transfer used in vLLM IPC mode.
-        
-        Args:
-            weights: List of (name, tensor) pairs
-            target_dtype: Target dtype for weight conversion
-            
-        Yields:
-            List of (name, tensor) pairs that fit in one bucket
-        """
-        current_bucket: list[tuple[str, torch.Tensor]] = []
-        current_size = 0
-        
-        for name, weight in weights:
-            # Convert weight to target dtype
-            weight = weight.to(target_dtype)
-            weight_size = weight.nbytes
-            
-            # Check if single weight exceeds bucket size
-            if weight_size > self.bucket_size:
-                # Yield current bucket first if not empty
-                if current_bucket:
-                    yield current_bucket
-                    current_bucket = []
-                    current_size = 0
-                # Yield the large weight as its own bucket
-                print(f"Warning: Weight {name} ({weight_size / 1e6:.2f}MB) exceeds bucket size")
-                yield [(name, weight)]
-                continue
-                
-            # Check if adding this weight would exceed bucket size
-            if current_size + weight_size > self.bucket_size:
-                yield current_bucket
-                current_bucket = []
-                current_size = 0
-                
-            current_bucket.append((name, weight))
-            current_size += weight_size
-            
-        # Yield remaining weights
-        if current_bucket:
-            yield current_bucket
-    
-    def _update_weights_bucket(self, weights: list[tuple[str, torch.Tensor]]):
-        """
-        Update model weights from a single bucket.
-        
-        This is the core update logic from vLLMColocateWorkerExtension._update_weights,
-        adapted for MXFP8 models.
-        
-        For MXFP8:
-        - vLLM's load_weights handles the online quantization internally
-        - The process_weights_after_loading hook in vLLM converts bf16 -> mxfp8
-        
-        Args:
-            weights: List of (name, tensor) pairs to load
-        """
-        # Move weights to GPU if needed
-        gpu_weights = []
-        for name, weight in weights:
-            if weight.device != self.device:
-                weight = weight.to(self.device, non_blocking=True)
-            gpu_weights.append((name, weight))
-        
-        # Synchronize to ensure all transfers complete
-        torch.cuda.synchronize()
-        
-        # Load weights using vLLM's load_weights method
-        # For MXFP8, vLLM internally handles the quantization
-        self.model.load_weights(gpu_weights)
-        
-    def update_weights(
-        self, 
-        weights: list[tuple[str, torch.Tensor]],
-        target_dtype: torch.dtype = torch.bfloat16
-    ):
-        """
-        Update model weights using bucket-based transfer pattern.
-        
-        This method implements the full update_weights_from_ipc flow from
-        vLLMColocateWorkerExtension, but without the IPC/ZMQ communication
-        since we're in the same process.
-        
-        Args:
-            weights: List of (name, tensor) pairs
-            target_dtype: Target dtype for weight conversion (default bf16)
-        """
-        print(f"Updating weights with bucket size: {self.bucket_size / 1e6:.2f}MB")
-        
-        bucket_count = 0
-        total_weights = 0
-        
-        for bucket in self._get_named_tensor_buckets(weights, target_dtype):
-            bucket_count += 1
-            total_weights += len(bucket)
-            print(f"  Processing bucket {bucket_count}: {len(bucket)} weights")
-            
-            self._update_weights_bucket(bucket)
-            
-            # Clean up bucket memory
-            del bucket
-            
-        # Final cleanup similar to vLLMColocateWorkerExtension
-        gc.collect()
-        torch.cuda.ipc_collect()
-        torch.cuda.empty_cache()
-        
-        print(f"Weight update complete: {total_weights} weights in {bucket_count} buckets")
-        
-    def print_sample_weights(self, prefix: str = ""):
-        """Print sample weights from first layer for debugging."""
-        for name, param in self.model.named_parameters():
-            if "layers.0" in name and "weight" in name:
-                print(f"{prefix}Name: {name}, dtype: {param.dtype}, data: {param.data.flatten()[:4]}")
+# ─── Weight Loading ────────────────────────────────────────────────
+def load_safetensors_weights(model_dir: str, device: str = "cpu"):
+    """Load all weight tensors from safetensors files per model.safetensors.index.json."""
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    with open(index_path) as f:
+        weight_map = json.load(f)["weight_map"]
 
+    # Group parameter names by file
+    file_to_names = {}
+    for name, fname in weight_map.items():
+        file_to_names.setdefault(fname, []).append(name)
 
-def get_bf16_weights_from_hf(model_name: str, trust_remote_code: bool = True):
-    """
-    Load bf16 weights from HuggingFace model.
-    Returns a list of (name, tensor) pairs.
-    """
-    print(f"Loading bf16 weights from HuggingFace model: {model_name}")
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=trust_remote_code,
-        device_map="cpu",  # Load to CPU first to avoid GPU memory issues
-    )
-    
-    # Collect all weights
     weights = []
-    for name, param in hf_model.named_parameters():
-        weights.append((name, param.data.clone()))
-    
-    # Clean up HuggingFace model to free memory
-    del hf_model
-    torch.cuda.empty_cache()
-    
-    print(f"Loaded {len(weights)} weights from HuggingFace model")
+    for fname in sorted(file_to_names):
+        fpath = os.path.join(model_dir, fname)
+        logger.info(f"  Loading {fname}")
+        with safe_open(fpath, framework="pt", device=device) as f:
+            for name in file_to_names[fname]:
+                weights.append((name, f.get_tensor(name)))
+
+    logger.info(f"Loaded {len(weights)} tensors from {len(file_to_names)} safetensors files")
     return weights
 
 
-def reload_weights_with_mxfp8_quant(llm: LLM, weights: list[tuple[str, torch.Tensor]]):
+def bucket_tensors(tensors, max_bytes):
+    """Group (name, tensor) pairs into byte-sized buckets.
+
+    Same logic as verl.workers.rollout.sglang_rollout.utils.get_named_tensor_buckets.
     """
-    Reload bf16 weights into vLLM model with MXFP8 online quantization.
-    
-    Uses the vLLMColocateWorkerExtension pattern:
-    1. Creates MXFP8WeightUpdater (similar to extension class)
-    2. Updates weights using bucket-based transfer
-    3. vLLM internally handles MXFP8 quantization
-    
-    Args:
-        llm: The vLLM LLM instance
-        weights: List of (name, tensor) pairs in bf16 format
-    """
-    # Create weight updater (similar to vLLMColocateWorkerExtension)
-    updater = MXFP8WeightUpdater(llm, bucket_size_mb=512)
-    
-    print("Before reload:")
-    updater.print_sample_weights(prefix="  ")
-    
-    # Update weights using bucket-based pattern
-    updater.update_weights(weights, target_dtype=torch.bfloat16)
-    
-    print("After reload:")
-    updater.print_sample_weights(prefix="  ")
+    bucket, cur = [], 0
+    for name, t in tensors:
+        nbytes = t.element_size() * t.numel()
+        if cur + nbytes > max_bytes and bucket:
+            yield bucket
+            bucket, cur = [], 0
+        bucket.append((name, t))
+        cur += nbytes
+    if bucket:
+        yield bucket
 
 
-def is_mxfp8_model(vllm_config) -> bool:
-    """
-    Check if the model is using MXFP8 quantization.
-    
-    Args:
-        vllm_config: vLLM configuration object
-        
-    Returns:
-        True if the model uses MXFP8 quantization
-    """
-    try:
-        from vllm.model_executor.layers.quantization.mxfp8 import MXFP8Config
-        if hasattr(vllm_config, "quant_config") and isinstance(vllm_config.quant_config, MXFP8Config):
-            return True
-    except ImportError:
-        pass
-    return False
+# ─── Main Test ─────────────────────────────────────────────────────
+async def main():
+    args = parse_args()
+    bucket_bytes = args.bucket_mb << 20
+    mp.set_start_method("spawn", force=True)
 
+    # ── Step 1: Init torch.distributed (required by sgl_update_weights for device_mesh)
+    logger.info("=" * 60)
+    logger.info("Step 1: Initializing torch.distributed")
+    logger.info("=" * 60)
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29500")
+        dist.init_process_group(backend="nccl", rank=0, world_size=1)
 
-def main():
-    model_name = "Qwen/Qwen3-8B-Base"
-    
-    print("=" * 80)
-    print("Step 1: Initialize vLLM with MXFP8 quantization")
-    print("=" * 80)
-    
-    llm = LLM(
-        model=model_name,
-        trust_remote_code=True,
+    device_mesh = init_device_mesh("cuda", (args.tp_size,), mesh_dim_names=("infer_tp",))
+    logger.info(f"Device mesh initialized: {device_mesh}")
+
+    # ── Step 2: Launch SGLang HTTP server (dummy weights + mxfp8 quantization)
+    #    This mirrors async_sglang_server.py: SGLangHttpServer.launch_server()
+    logger.info("=" * 60)
+    logger.info("Step 2: Launching SGLang HTTP server (dummy weights + mxfp8)")
+    logger.info("=" * 60)
+    engine = AsyncHttpServerAdapter(
+        model_path=args.model_path,
+        tp_size=args.tp_size,
         quantization="mxfp8",
-        enable_sleep_mode=True,  # Enable sleep mode for testing
+        json_model_override_args=json.dumps({"quantization_config": MXFP8_QUANT_CONFIG}),
         load_format="dummy",
+        mem_fraction_static=args.mem_fraction,
+        trust_remote_code=True,
+        enable_memory_saver=True,
+        log_level="info",
+        host="127.0.0.1",
+        port=args.port,
+        launch_server=True,
+        first_rank_in_node=True,
+        fp8_gemm_runner_backend="triton",
+        moe_runner_backend="cutlass",
     )
+    logger.info(f"SGLang server running at http://127.0.0.1:{args.port}")
+
+    # ── Step 3: Load pre-quantized MXFP8 weights from safetensors
+    logger.info("=" * 60)
+    logger.info("Step 3: Loading MXFP8 weights from safetensors (to CPU)")
+    logger.info("=" * 60)
+    weights = load_safetensors_weights(args.model_path, device="cpu")
+
+    # ── Step 4: Sync weights via sgl_update_weights
+    #    Same call path as sglang_rollout.py: ServerAdapter.update_weights()
+    logger.info("=" * 60)
+    logger.info("Step 4: Syncing MXFP8 weights to SGLang server")
+    logger.info("=" * 60)
+
+    # Use iterator with look-ahead to detect the last bucket without loading all into memory
+    bucket_iter = bucket_tensors(weights, bucket_bytes)
     
-    # Print model info and verify MXFP8 quantization
-    print("\n" + "=" * 80)
-    print("Model Info:")
-    print("=" * 80)
     try:
-        model_runner = llm.llm_engine.model_executor.driver_worker.model_runner
-    except AttributeError:
-        model_runner = llm.llm_engine.engine_core.model_executor.driver_worker.model_runner
-    
-    print(f"Is MXFP8 model: {is_mxfp8_model(model_runner.vllm_config)}")
-    print(f"Quant config: {model_runner.vllm_config.quant_config}")
-    
-    # Print sample weights (first layer)
-    print("\nModel Weights (First Layer Sample):")
-    model = model_runner.model
-    for name, param in model.named_parameters():
-        if "layers.0" in name and "weight" in name:
-            print(f"  Name: {name}, dtype: {param.dtype}, data: {param.data.flatten()[:4]}")
-    
-    # Setup inference
-    prompt = "Hello, my name is"
-    prompts = [prompt]
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
-    
-    # First inference (with dummy weights)
-    print("\n" + "=" * 80)
-    print("Step 2: First Inference (With Dummy Weights)")
-    print("=" * 80)
-    outputs = llm.generate(prompts, sampling_params)
-    
-    first_output = outputs[0].outputs[0].text
-    print(f"Input: {prompt}")
-    print(f"Output: {first_output}")
-    
-    # Load bf16 weights from HuggingFace
-    print("\n" + "=" * 80)
-    print("Step 3: Load bf16 Weights from HuggingFace")
-    print("=" * 80)
-    bf16_weights = get_bf16_weights_from_hf(model_name)
-    
-    # Reload weights with MXFP8 quantization using extension pattern
-    print("\n" + "=" * 80)
-    print("Step 4: Reload bf16 Weights with MXFP8 Online Quantization")
-    print("       (Using vLLMColocateWorkerExtension pattern)")
-    print("=" * 80)
-    reload_weights_with_mxfp8_quant(llm, bf16_weights)
-    
-    # Clean up bf16 weights to free memory
-    del bf16_weights
-    gc.collect()
-    torch.cuda.empty_cache()
-    
-    # Second inference after reload
-    print("\n" + "=" * 80)
-    print("Step 5: Second Inference (After Weight Reload)")
-    print("=" * 80)
-    outputs = llm.generate(prompts, sampling_params)
-    
-    second_output = outputs[0].outputs[0].text
-    print(f"Input: {prompt}")
-    print(f"Output: {second_output}")
-    
-    # Compare outputs
-    print("\n" + "=" * 80)
-    print("Summary:")
-    print("=" * 80)
-    print(f"First output (dummy weights):  {first_output[:50]}...")
-    print(f"Second output (real weights):  {second_output[:50]}...")
-    outputs_match = first_output == second_output
-    print(f"Outputs match: {outputs_match}")
-    
-    if not outputs_match:
-        print("SUCCESS: Outputs differ, indicating weights were successfully reloaded!")
-    else:
-        print("WARNING: Outputs are identical - weights may not have been properly updated")
-    
-    print("\n" + "=" * 80)
-    print("Test completed!")
-    print("=" * 80)
+        current_batch = next(bucket_iter)
+        bucket_idx = 0
+        
+        while True:
+            try:
+                # Try to peek the next batch
+                next_batch = next(bucket_iter)
+                # If we got next_batch, current_batch is not the last one
+                is_last_bucket = False
+                
+                # Move batch to CUDA (sgl_update_weights expects GPU tensors, matching training flow)
+                cuda_batch = [(name, t.cuda()) for name, t in current_batch]
+                
+                logger.info(
+                    f"  Bucket {bucket_idx}: {len(cuda_batch)} tensors, "
+                    f"first={cuda_batch[0][0]}, last={cuda_batch[-1][0]}"
+                )
+                
+                await sgl_update_weights(
+                    engine=engine,
+                    params_batch=cuda_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=device_mesh,
+                    run_post_process=is_last_bucket,
+                )
+                
+                del cuda_batch
+                torch.cuda.empty_cache()
+                
+                # Move to next batch
+                current_batch = next_batch
+                bucket_idx += 1
+                
+            except StopIteration:
+                # No more batches after current_batch, so it's the last one
+                is_last_bucket = True
+                
+                # Move batch to CUDA
+                cuda_batch = [(name, t.cuda()) for name, t in current_batch]
+                
+                logger.info(
+                    f"  Bucket {bucket_idx}: {len(cuda_batch)} tensors, "
+                    f"first={cuda_batch[0][0]}, last={cuda_batch[-1][0]} (last bucket)"
+                )
+                
+                await sgl_update_weights(
+                    engine=engine,
+                    params_batch=cuda_batch,
+                    device_mesh_key="infer_tp",
+                    device_mesh=device_mesh,
+                    # Trigger post-processing (e.g. MxFP8 MoE scale swizzle) on the last bucket
+                    run_post_process=is_last_bucket,
+                )
+                
+                del cuda_batch
+                torch.cuda.empty_cache()
+                break
+                
+    except StopIteration:
+        # Empty iterator, no buckets to process
+        logger.warning("No weight buckets to sync")
+
+    del weights
+    logger.info("Weight sync complete!")
+
+    # Flush KV cache after weight update (same as sglang_rollout.py line 233)
+    await engine.flush_cache()
+    logger.info("Cache flushed")
+
+    # ── Step 5: Test inference
+    logger.info("=" * 60)
+    logger.info("Step 5: Testing inference with synced MXFP8 weights")
+    logger.info("=" * 60)
+    test_prompts = [
+        "Hello, my name is",
+        "What is 2 + 3? Answer:",
+    ]
+    sampling_params = {"temperature": 0.7, "max_new_tokens": 128, "top_p": 0.9}
+
+    for prompt in test_prompts:
+        result = await engine.generate(prompt=prompt, sampling_params=sampling_params)
+        text = result.get("text", "<empty>")
+        logger.info(f"\n  Prompt : {prompt}\n  Output : {text}")
+
+    # ── Cleanup
+    logger.info("=" * 60)
+    logger.info("Cleanup")
+    logger.info("=" * 60)
+    engine.shutdown()
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+    logger.info("Test PASSED!")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
