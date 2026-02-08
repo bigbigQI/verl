@@ -372,6 +372,7 @@ class HttpServerAdapter(EngineBase):
         named_tensors = req.serialized_named_tensors
         load_format = req.load_format
         flush_cache = req.flush_cache
+        run_post_process = getattr(req, "run_post_process", False)
 
         if named_tensors:
             serialized_named_tensors = [
@@ -386,6 +387,7 @@ class HttpServerAdapter(EngineBase):
                 "serialized_named_tensors": serialized_named_tensors,
                 "load_format": load_format,
                 "flush_cache": flush_cache,
+                "run_post_process": run_post_process,
             },
         )
 
@@ -765,6 +767,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
         named_tensors = req.serialized_named_tensors
         load_format = req.load_format
         flush_cache = req.flush_cache
+        run_post_process = getattr(req, "run_post_process", False)
 
         serialized_named_tensors = [base64.b64encode(named_tensor).decode("utf-8") for named_tensor in named_tensors]
         return await self._make_async_request(
@@ -773,6 +776,7 @@ class AsyncHttpServerAdapter(HttpServerAdapter):
                 "serialized_named_tensors": serialized_named_tensors,
                 "load_format": load_format,
                 "flush_cache": flush_cache,
+                "run_post_process": run_post_process,
             },
         )
 
