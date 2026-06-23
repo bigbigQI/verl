@@ -1,0 +1,11 @@
+--- a/python/sglang/srt/layers/layernorm.py
++++ b/python/sglang/srt/layers/layernorm.py
+@@ -204,6 +204,8 @@ class RMSNorm(MultiPlatformOp):
+         residual: Optional[torch.Tensor] = None,
+         post_residual_addition: Optional[torch.Tensor] = None,
+     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
++        return self.forward_native(x, residual, post_residual_addition)
++
+         if x.numel() == 0:
+             if residual is not None:
+                 if post_residual_addition is not None:

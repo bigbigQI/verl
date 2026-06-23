@@ -1,0 +1,120 @@
+#!/bin/bash
+
+#SBATCH --account=coreai_dlalgo_nemorl
+#SBATCH --exclusive
+#SBATCH --partition=batch
+#SBATCH --job-name=general_sa-verl.sglang_mxfp8_smoke
+#SBATCH --mail-type=ALL
+#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:4
+#SBATCH --time=1:30:00
+#SBATCH --output=./slurm/%j.out
+#SBATCH --error=./slurm/%j.err
+
+set -x
+
+CONTAINER="/lustre/fsw/portfolios/coreai/users/larkz/docker_images/sglang_62.sqsh"
+
+MOUNTS=""
+current_dir=$(pwd)
+MOUNTS+="${current_dir}/..:/apps"
+export HF_HOME=/apps/.cache
+SGLANG_PATCHED_DIR="/tmp/sglang-mxfp8-patched-${SLURM_JOB_ID}"
+RAY_TMP_DIR="/tmp/ray-${USER}-${SLURM_JOB_ID}"
+mkdir -p "${RAY_TMP_DIR}"
+MOUNTS+=",${RAY_TMP_DIR}:/tmp/ray"
+
+current_time=$(date +"%Y%m%d_%H%M")
+WBPROJECT=verl_${current_time}
+echo $WBPROJECT
+
+export HYDRA_FULL_ERROR=1
+export NCCL_AVOID_RECORD_STREAMS=1
+
+mkdir -p logs
+
+JOBLOG="$(realpath .)/logs/verl_8b_sglang_mxfp8_smoke-$SLURM_JOB_ID.log"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Job ${SLURM_JOB_ID} started ..." &>> ${JOBLOG}
+ray_pids=()
+
+cleanup() {
+    for pid in "${ray_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+        fi
+    done
+}
+trap cleanup EXIT
+
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=( $nodes )
+node_1=${nodes_array[0]}
+ip=$node_1
+
+port=6379
+ip_head=$ip:$port
+export ip_head
+echo "IP Head: $ip_head"  &>> ${JOBLOG}
+
+echo "STARTING HEAD at $node_1"  &>> ${JOBLOG}
+srun --nodes=1 --ntasks=1 -w "$node_1" --container-image="$CONTAINER" --no-container-mount-home --container-mounts="$MOUNTS" bash -c "
+    export WANDB_API_KEY=149737fd3c4537b349a37aab90b6fff96f385ebc &&
+    export HF_HOME=/apps/.cache &&
+    export ROCR_VISIBLE_DEVICES= &&
+    export SGLANG_PATCHED_PYTHONPATH=\$(bash /apps/verl/scripts/prepare_sglang_mxfp8.sh ${SGLANG_PATCHED_DIR}) &&
+    export PYTHONPATH=\${SGLANG_PATCHED_PYTHONPATH}:\${PYTHONPATH:-} &&
+    ray start --head --node-ip-address=$ip --num-gpus=4 --port=$port --block
+" &>> ${JOBLOG} &
+ray_pids+=($!)
+sleep 20s
+
+worker_num=$((SLURM_JOB_NUM_NODES))
+for ((i = 1; i < worker_num; i++)); do
+node_i=${nodes_array[$i]}
+echo "STARTING WORKER $i at $node_i"  &>> ${JOBLOG}
+srun --nodes=1 --ntasks=1 -w "$node_i" --container-image="$CONTAINER" --no-container-mount-home --container-mounts="$MOUNTS" bash -c "
+    export WANDB_API_KEY=149737fd3c4537b349a37aab90b6fff96f385ebc &&
+    export HF_HOME=/apps/.cache &&
+    export ROCR_VISIBLE_DEVICES= &&
+    export SGLANG_PATCHED_PYTHONPATH=\$(bash /apps/verl/scripts/prepare_sglang_mxfp8.sh ${SGLANG_PATCHED_DIR}) &&
+    export PYTHONPATH=\${SGLANG_PATCHED_PYTHONPATH}:\${PYTHONPATH:-} &&
+    ray start --address $ip_head --num-gpus 4 --block" &>> ${JOBLOG} &
+ray_pids+=($!)
+sleep 2s
+done
+
+sleep 30s
+
+read -r -d '' cmd <<EOF
+echo "*******STARTING********" \
+&& echo "---------------" \
+&& ray status --address=${ip_head} \
+&& export WANDB_API_KEY=149737fd3c4537b349a37aab90b6fff96f385ebc \
+&& export HF_HOME=/apps/.cache \
+&& export NNODES=${SLURM_JOB_NUM_NODES} \
+&& export RAY_ADDRESS=${ip_head} \
+&& export PROJECT_NAME=DAPO-mxfp8-rebase-smoke \
+&& export MAX_RESPONSE_LENGTH=512 \
+&& export TRAIN_PROMPT_BSZ=4 \
+&& export GEN_PROMPT_BSZ=4 \
+&& export N_RESP_PER_PROMPT=2 \
+&& export TRAIN_PROMPT_MINI_BSZ=4 \
+&& export ACTOR_LR_WARMUP_STEPS=0 \
+&& export ENABLE_FILTER_GROUPS=False \
+&& export MAX_NUM_GEN_BATCHES=1 \
+&& export ROLLOUT_MAX_NUM_BATCHED_TOKENS=2048 \
+&& export TRAINER_TEST_FREQ=1 \
+&& export TRAINER_SAVE_FREQ=-1 \
+&& export TRAINER_TOTAL_EPOCHS=1 \
+&& export TRAINER_TOTAL_TRAINING_STEPS=1 \
+&& export SGLANG_PATCHED_PYTHONPATH=\$(bash /apps/verl/scripts/prepare_sglang_mxfp8.sh ${SGLANG_PATCHED_DIR}) \
+&& export PYTHONPATH=\${SGLANG_PATCHED_PYTHONPATH}:\${PYTHONPATH:-} \
+&& cd /apps/verl/ \
+&& bash recipe/dapo/dapo_mxfp8.sh dapo-qwen3-8b-megatron-sglang-mxfp8-smoke-${SLURM_JOB_ID}
+EOF
+
+srun --overlap --nodes=1 --ntasks=1 -w "$node_1" --container-image="$CONTAINER" --no-container-mount-home --container-mounts="$MOUNTS" bash -c \
+    "$cmd" &>> ${JOBLOG}
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Job ${SLURM_JOB_ID} stopped ..." &>> ${JOBLOG}

@@ -1,0 +1,159 @@
+#!/bin/bash
+
+#SBATCH --account=coreai_dlalgo_nemorl
+#SBATCH --exclusive
+#SBATCH --partition=batch
+#SBATCH --job-name=general_sa-verl.megatron_bf16_sglang_mxfp8
+#SBATCH --mail-type=ALL
+#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=4
+#SBATCH --gres=gpu:4
+#SBATCH --time=3:59:00
+#SBATCH --output=./slurm/%j.out
+#SBATCH --error=./slurm/%j.err
+##SBATCH --overcommit
+
+set -x
+
+CONTAINER="/lustre/fsw/portfolios/coreai/users/larkz/docker_images/sglang_62.sqsh"
+
+MOUNTS=""
+current_dir=$(pwd)
+MOUNTS+="${current_dir}/..:/apps"
+export HF_HOME=/apps/.cache
+
+SGLANG_PATCHED_DIR="/tmp/sglang-mxfp8-patched-${SLURM_JOB_ID}"
+RAY_TMP_DIR="/tmp/ray-${USER}-${SLURM_JOB_ID}"
+mkdir -p "${RAY_TMP_DIR}"
+MOUNTS+=",${RAY_TMP_DIR}:/tmp/ray"
+
+PROJECT_NAME_VALUE="${PROJECT_NAME:-DAPO-mxfp8-bf16-train-4n}"
+EXP_NAME_VALUE="${EXP_NAME:-dapo-qwen3-8b-megatron-bf16-sglang-mxfp8-flashinfer-legacy-dcp16-4n-rsp20k-300step}"
+TRAINER_TOTAL_TRAINING_STEPS_VALUE="${TRAINER_TOTAL_TRAINING_STEPS:-300}"
+TRAINER_VAL_BEFORE_TRAIN_VALUE="${TRAINER_VAL_BEFORE_TRAIN:-False}"
+TRAINER_TEST_FREQ_VALUE="${TRAINER_TEST_FREQ:-10}"
+TRAINER_SAVE_FREQ_VALUE="${TRAINER_SAVE_FREQ:-5}"
+TRAINER_RESUME_MODE_VALUE="${TRAINER_RESUME_MODE:-auto}"
+MAX_RESPONSE_LENGTH_VALUE="${MAX_RESPONSE_LENGTH:-20480}"
+ROLLOUT_ENFORCE_EAGER_VALUE="${ROLLOUT_ENFORCE_EAGER:-True}"
+ROLLOUT_QUANTIZATION_VALUE="${ROLLOUT_QUANTIZATION:-mxfp8}"
+FP8_GEMM_RUNNER_BACKEND_VALUE="${FP8_GEMM_RUNNER_BACKEND:-triton}"
+MOE_RUNNER_BACKEND_VALUE="${MOE_RUNNER_BACKEND:-cutlass}"
+CKPTS_DIR_VALUE="${CKPTS_DIR:-/apps/ckpts/${PROJECT_NAME_VALUE}/${EXP_NAME_VALUE}}"
+ACTOR_LR_WARMUP_STEPS_VALUE="${ACTOR_LR_WARMUP_STEPS:-10}"
+VERL_MEGATRON_DCP_THREAD_COUNT_VALUE="${VERL_MEGATRON_DCP_THREAD_COUNT:-16}"
+ACTOR_CHECKPOINT_SAVE_CONTENTS_VALUE="${ACTOR_CHECKPOINT_SAVE_CONTENTS:-model_extra}"
+ACTOR_CHECKPOINT_LOAD_CONTENTS_VALUE="${ACTOR_CHECKPOINT_LOAD_CONTENTS:-model_extra}"
+WANDB_RUN_ID_VALUE="${WANDB_RUN_ID:-${EXP_NAME_VALUE}}"
+WANDB_RESUME_VALUE="${WANDB_RESUME:-allow}"
+
+current_time=$(date +"%Y%m%d_%H%M")
+WBPROJECT=verl_${current_time}
+echo "$WBPROJECT"
+
+export HYDRA_FULL_ERROR=1
+export NCCL_AVOID_RECORD_STREAMS=1
+export TORCH_NCCL_AVOID_RECORD_STREAMS=1
+export VERL_DISABLE_TORCH_SAVE_CRC32=1
+export VERL_MEGATRON_DCP_THREAD_COUNT="${VERL_MEGATRON_DCP_THREAD_COUNT_VALUE}"
+export VERL_USE_LEGACY_TORCH_SAVE=1
+export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1
+export TORCHDYNAMO_DISABLE=1
+export VERL_SET_TRITON_TORCH_ALLOCATOR=1
+
+mkdir -p logs slurm
+
+JOBLOG="$(realpath .)/logs/verl_8b_sglang_mxfp8_bf16_train-${SLURM_JOB_ID}.log"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Job ${SLURM_JOB_ID} started ..." &>> "${JOBLOG}"
+ray_pids=()
+
+cleanup() {
+    for pid in "${ray_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+        fi
+    done
+}
+trap cleanup EXIT
+
+nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
+nodes_array=( $nodes )
+node_1=${nodes_array[0]}
+ip=$node_1
+
+srun --nodes="${SLURM_JOB_NUM_NODES}" --ntasks="${SLURM_JOB_NUM_NODES}" \
+    bash -c "mkdir -p ${RAY_TMP_DIR}"
+
+port=6379
+ip_head=$ip:$port
+export ip_head
+echo "IP Head: $ip_head" &>> "${JOBLOG}"
+
+common_ray_exports="set -e; export WANDB_API_KEY=\${WANDB_API_KEY:-149737fd3c4537b349a37aab90b6fff96f385ebc}; export HF_HOME=/apps/.cache; mkdir -p /apps/wandb; export WANDB_DIR=/apps/wandb; export WANDB_RUN_ID=${WANDB_RUN_ID_VALUE}; export WANDB_RESUME=${WANDB_RESUME_VALUE}; export VERL_DISABLE_TORCH_SAVE_CRC32=1; export VERL_MEGATRON_DCP_THREAD_COUNT=${VERL_MEGATRON_DCP_THREAD_COUNT_VALUE}; export VERL_USE_LEGACY_TORCH_SAVE=1; export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1; export TORCHDYNAMO_DISABLE=1; export VERL_SET_TRITON_TORCH_ALLOCATOR=1; export ROCR_VISIBLE_DEVICES=; export SGLANG_PATCHED_PYTHONPATH=\$(bash /apps/verl/scripts/prepare_sglang_mxfp8.sh ${SGLANG_PATCHED_DIR}); export PYTHONPATH=\${SGLANG_PATCHED_PYTHONPATH}:\${PYTHONPATH:-}"
+
+echo "STARTING HEAD at $node_1" &>> "${JOBLOG}"
+srun --nodes=1 --ntasks=1 -w "$node_1" --container-image="$CONTAINER" --no-container-mount-home --container-mounts="$MOUNTS" bash -c "
+    ${common_ray_exports};
+    ray start --head --node-ip-address=$ip --num-gpus=4 --port=$port --block
+" &>> "${JOBLOG}" &
+ray_pids+=($!)
+sleep 20s
+
+worker_num=$((SLURM_JOB_NUM_NODES))
+for ((i = 1; i < worker_num; i++)); do
+node_i=${nodes_array[$i]}
+echo "STARTING WORKER $i at $node_i" &>> "${JOBLOG}"
+srun --nodes=1 --ntasks=1 -w "$node_i" --container-image="$CONTAINER" --no-container-mount-home --container-mounts="$MOUNTS" bash -c "
+    ${common_ray_exports};
+    ray start --address $ip_head --num-gpus 4 --block
+" &>> "${JOBLOG}" &
+ray_pids+=($!)
+sleep 2s
+done
+
+sleep 30s
+
+read -r -d '' cmd <<EOF
+echo "*******STARTING********" \
+&& echo "---------------" \
+&& ray status --address=${ip_head} \
+&& export WANDB_API_KEY=\${WANDB_API_KEY:-149737fd3c4537b349a37aab90b6fff96f385ebc} \
+&& export HF_HOME=/apps/.cache \
+&& mkdir -p /apps/wandb \
+&& export WANDB_DIR=/apps/wandb \
+&& export WANDB_RUN_ID=${WANDB_RUN_ID_VALUE} \
+&& export WANDB_RESUME=${WANDB_RESUME_VALUE} \
+&& export VERL_DISABLE_TORCH_SAVE_CRC32=1 \
+&& export VERL_MEGATRON_DCP_THREAD_COUNT=${VERL_MEGATRON_DCP_THREAD_COUNT_VALUE} \
+&& export VERL_USE_LEGACY_TORCH_SAVE=1 \
+&& export NVTE_FP8_BLOCK_SCALING_FP32_SCALES=1 \
+&& export TORCHDYNAMO_DISABLE=1 \
+&& export VERL_SET_TRITON_TORCH_ALLOCATOR=1 \
+&& export NNODES=${SLURM_JOB_NUM_NODES} \
+&& export RAY_ADDRESS=${ip_head} \
+&& export PROJECT_NAME=${PROJECT_NAME_VALUE} \
+&& export EXP_NAME=${EXP_NAME_VALUE} \
+&& export TRAINER_TOTAL_TRAINING_STEPS=${TRAINER_TOTAL_TRAINING_STEPS_VALUE} \
+&& export TRAINER_VAL_BEFORE_TRAIN=${TRAINER_VAL_BEFORE_TRAIN_VALUE} \
+&& export TRAINER_TEST_FREQ=${TRAINER_TEST_FREQ_VALUE} \
+&& export TRAINER_SAVE_FREQ=${TRAINER_SAVE_FREQ_VALUE} \
+&& export TRAINER_RESUME_MODE=${TRAINER_RESUME_MODE_VALUE} \
+&& export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH_VALUE} \
+&& export ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER_VALUE} \
+&& export ROLLOUT_QUANTIZATION=${ROLLOUT_QUANTIZATION_VALUE} \
+&& export FP8_GEMM_RUNNER_BACKEND=${FP8_GEMM_RUNNER_BACKEND_VALUE} \
+&& export MOE_RUNNER_BACKEND=${MOE_RUNNER_BACKEND_VALUE} \
+&& export CKPTS_DIR=${CKPTS_DIR_VALUE} \
+&& export ACTOR_LR_WARMUP_STEPS=${ACTOR_LR_WARMUP_STEPS_VALUE} \
+&& export ACTOR_CHECKPOINT_SAVE_CONTENTS=${ACTOR_CHECKPOINT_SAVE_CONTENTS_VALUE} \
+&& export ACTOR_CHECKPOINT_LOAD_CONTENTS=${ACTOR_CHECKPOINT_LOAD_CONTENTS_VALUE} \
+&& export SGLANG_PATCHED_PYTHONPATH=\$(bash /apps/verl/scripts/prepare_sglang_mxfp8.sh ${SGLANG_PATCHED_DIR}) \
+&& export PYTHONPATH=\${SGLANG_PATCHED_PYTHONPATH}:\${PYTHONPATH:-} \
+&& cd /apps/verl/ \
+&& bash recipe/dapo/dapo_mxfp8_bf16.sh \${EXP_NAME}
+EOF
+
+srun --overlap --nodes=1 --ntasks=1 -w "$node_1" --container-image="$CONTAINER" --no-container-mount-home --container-mounts="$MOUNTS" bash -c \
+    "$cmd" &>> "${JOBLOG}"
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') Job ${SLURM_JOB_ID} stopped ..." &>> "${JOBLOG}"

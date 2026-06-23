@@ -646,6 +646,21 @@ class RayWorkerGroup(WorkerGroup):
                 )
                 raise ValueError(f"Cannot override protected system env: {conflict_env_vars}")
             env_vars.update(worker_env)
+        for env_name in (
+            "NVTE_FP8_BLOCK_SCALING_FP32_SCALES",
+            "TORCHDYNAMO_DISABLE",
+            "VERL_DISABLE_TORCH_SAVE_CRC32",
+            "VERL_MEGATRON_DCP_THREAD_COUNT",
+            "VERL_SET_TRITON_TORCH_ALLOCATOR",
+            "VERL_USE_LEGACY_TORCH_SAVE",
+            "WANDB_DIR",
+            "WANDB_RESUME",
+            "WANDB_RUN_ID",
+            "SGLANG_PATCHED_PYTHONPATH",
+            "PYTHONPATH",
+        ):
+            if env_name not in env_vars and os.environ.get(env_name) is not None:
+                env_vars[env_name] = os.environ[env_name]
         import re
 
         cia_name = type(ray_cls_with_init.cls).__name__

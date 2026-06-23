@@ -131,6 +131,10 @@ class ServerAdapter(BaseRollout):
             }
             fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
             self.model_config.hf_config.quantization_config = fp8_block_quant_kwargs
+        elif self.config.get("quantization", None) == "mxfp8":
+            from verl.utils.sglang.sglang_mxfp8_utils import get_mxfp8_quant_config
+
+            self.model_config.hf_config.quantization_config = get_mxfp8_quant_config()
         self._engine: AsyncHttpServerAdapter = None
 
         rank = int(os.environ["RANK"])
@@ -343,6 +347,17 @@ class ServerAdapter(BaseRollout):
                     weights,
                     dtype=self.model_config.hf_config.dtype,
                 )
+            elif self.config.get("quantization", None) == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import SGLangMXFP8QuantizerHelper
+
+                logger.info("Convert bf16 weights to mxfp8 format before loading")
+                mxfp8_quantizer_helper = SGLangMXFP8QuantizerHelper(
+                    self.model_config.hf_config.quantization_config
+                )
+                weights = mxfp8_quantizer_helper.quant_weights_by_name(
+                    weights,
+                    dtype=self.model_config.hf_config.dtype,
+                )
             else:
                 weights = weights
 
@@ -355,6 +370,9 @@ class ServerAdapter(BaseRollout):
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
+            if self.config.get("quantization", None) == "mxfp8":
+                logger.info("Post-process SGLang MXFP8 weights after loading")
+                await self._engine.post_process_weights(post_process_quantization=True)
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)

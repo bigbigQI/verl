@@ -34,6 +34,24 @@ set_basic_config(level=logging.WARNING)
 
 __all__ = ["DataProto", "__version__"]
 
+if os.getenv("VERL_DISABLE_TORCH_SAVE_CRC32", "False").lower() in ("1", "true", "yes", "on"):
+    import torch
+
+    if hasattr(torch.serialization, "set_crc32_options"):
+        torch.serialization.set_crc32_options(False)
+
+if os.getenv("VERL_USE_LEGACY_TORCH_SAVE", "False").lower() in ("1", "true", "yes", "on"):
+    import torch
+
+    if not getattr(torch.save, "_verl_legacy_save", False):
+        _verl_torch_save = torch.save
+
+        def _legacy_torch_save(*args, **kwargs):
+            kwargs["_use_new_zipfile_serialization"] = False
+            return _verl_torch_save(*args, **kwargs)
+
+        _legacy_torch_save._verl_legacy_save = True
+        torch.save = _legacy_torch_save
 
 modules = os.getenv("VERL_USE_EXTERNAL_MODULES", "")
 if modules:

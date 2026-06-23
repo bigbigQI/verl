@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+import os
+
 import megatron.core
 import torch
 from megatron.core import dist_checkpointing, mpu
@@ -25,6 +28,34 @@ from megatron.core.dist_checkpointing.strategies.fully_parallel import (
 )
 from packaging import version
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_save_strategy(save_strategy):
+    thread_count = os.getenv("VERL_MEGATRON_DCP_THREAD_COUNT")
+    if not thread_count:
+        return save_strategy
+
+    try:
+        thread_count_value = int(thread_count)
+    except ValueError:
+        logger.warning("Ignoring invalid VERL_MEGATRON_DCP_THREAD_COUNT=%r", thread_count)
+        return save_strategy
+
+    if thread_count_value <= 0:
+        return save_strategy
+
+    if hasattr(save_strategy, "thread_count"):
+        save_strategy.thread_count = thread_count_value
+        logger.info("Set Megatron DCP save strategy thread_count=%s", thread_count_value)
+    else:
+        logger.warning(
+            "VERL_MEGATRON_DCP_THREAD_COUNT=%s was set, but %s has no thread_count attribute",
+            thread_count_value,
+            type(save_strategy).__name__,
+        )
+    return save_strategy
+
 
 def save_dist_checkpointing(
     sharded_state_dict,
@@ -35,6 +66,7 @@ def save_dist_checkpointing(
     validate_sharding_integrity = True
     # Get checkpointing strategies
     save_strategy = get_default_save_sharded_strategy("torch_dist")
+    save_strategy = _configure_save_strategy(save_strategy)
     save_strategy = FullyParallelSaveStrategyWrapper(
         save_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
     )

@@ -279,8 +279,17 @@ class SGLangHttpServer:
                     "weight_block_size": [128, 128],
                 }
                 fp8_block_quant_kwargs = dict(FP8_BLOCK_QUANT_KWARGS)
+            elif quantization == "mxfp8":
+                from verl.utils.sglang.sglang_mxfp8_utils import get_mxfp8_quant_config
+
+                mxfp8_block_quant_kwargs = get_mxfp8_quant_config()
             else:
-                raise ValueError(f"Currently only support fp8 quantization, got: {quantization}")
+                raise ValueError(f"Currently only support fp8 and mxfp8 quantization, got: {quantization}")
+        quantization_config = None
+        if quantization == "fp8":
+            quantization_config = fp8_block_quant_kwargs
+        elif quantization == "mxfp8":
+            quantization_config = mxfp8_block_quant_kwargs
         infer_tp = self.config.tensor_model_parallel_size * self.config.data_parallel_size
         args = {
             "model_path": self.model_config.local_path,
@@ -299,13 +308,14 @@ class SGLangHttpServer:
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
             "log_level": "error",
+            "disable_piecewise_cuda_graph": self.config.enforce_eager,
             "mm_attention_backend": mm_attention_backend,
             "attention_backend": attention_backend,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,
             "skip_server_warmup": True,
             "quantization": quantization,
-            "json_model_override_args": json.dumps({"quantization_config": fp8_block_quant_kwargs})
-            if quantization == "fp8"
+            "json_model_override_args": json.dumps({"quantization_config": quantization_config})
+            if quantization_config is not None
             else json.dumps({}),
             **engine_kwargs,
         }
