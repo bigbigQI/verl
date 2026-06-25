@@ -26,10 +26,28 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class FP8QuantizerHelper:
+    # Human-readable label used in the per-weight quantization debug log.
+    _quant_label = "FP8 blockwise"
+    # When False (the default), a quantization failure falls back to emitting the
+    # original unquantized weight. Subclasses that must fail loudly set this True.
+    _reraise_quant_errors = False
+
     def __init__(self, quant_config):
         self.quant_config = quant_config
 
-    def should_quantize_param(self, param_name):
+    def _get_quant_config_value(self, key, default=None):
+        """Read ``key`` from ``quant_config``, supporting both dicts and objects."""
+        if isinstance(self.quant_config, dict):
+            return self.quant_config.get(key, default)
+        return getattr(self.quant_config, key, default)
+
+    def _resolve_weight_block_size(self):
+        weight_block_size = self._get_quant_config_value("weight_block_size")
+        if weight_block_size is None:
+            raise ValueError("weight_block_size not found in quant_config")
+        return weight_block_size
+
+    def should_quantize_param(self, param_name, tensor=None):
         """Determine whether to quantize to FP8 based on parameter name
 
         Quantization rules:
@@ -83,6 +101,20 @@ class FP8QuantizerHelper:
         logger.debug(f"Skip quantization: {param_name}")
         return False
 
+    def _quantize_param(self, param_name, tensor, dtype, weight_block_size):
+        """Quantize a single weight tensor.
+
+        Returns a list of ``(name, tensor)`` pairs to emit (the quantized weight
+        followed by its scale). Subclasses override this to plug in a different
+        quantization scheme while reusing the shared iteration loop.
+        """
+        param_lp, param_scale = scaled_fp8_blockwise(
+            tensor.to(dtype),
+            weight_block_size=weight_block_size,
+        )
+        param_scale = param_scale.squeeze(-1)
+        return [(param_name, param_lp), (param_name + "_scale_inv", param_scale)]
+
     async def quant_weights_by_name(self, weights, dtype=torch.bfloat16):
         """FP8 quantization based on parameter name using a memory-efficient generator.
 
@@ -94,39 +126,33 @@ class FP8QuantizerHelper:
         Yields:
             Tuples of (name, tensor) for each weight and its scale
         """
-        if isinstance(self.quant_config, dict):
-            weight_block_size = self.quant_config.get("weight_block_size")
-        else:
-            weight_block_size = getattr(self.quant_config, "weight_block_size", None)
-
-        if weight_block_size is None:
-            raise ValueError("weight_block_size not found in quant_config")
+        weight_block_size = self._resolve_weight_block_size()
 
         async for k, v in ensure_async_iterator(weights):
             # Check if quantization is needed
-            if not self.should_quantize_param(k):
+            if not self.should_quantize_param(k, v):
                 yield (k, v)
                 continue
 
-            # Quantize to FP8
             try:
-                if torch.distributed.get_rank() == 0:
-                    logger.debug(f"Quantizing to FP8 blockwise: {k}")
+                if (
+                    torch.distributed.is_available()
+                    and torch.distributed.is_initialized()
+                    and torch.distributed.get_rank() == 0
+                ):
+                    logger.debug(f"Quantizing to {self._quant_label}: {k}")
 
-                param_lp, param_scale = scaled_fp8_blockwise(
-                    v.to(dtype),
-                    weight_block_size=weight_block_size,
-                )
-                param_scale = param_scale.squeeze(-1)
-
-                # Yield the quantized weight and scale
-                yield (k, param_lp)
-                yield (k + "_scale_inv", param_scale)
-
-                # Explicitly delete to help GC
-                del param_lp, param_scale
-
+                quantized = self._quantize_param(k, v, dtype, weight_block_size)
             except Exception as e:
                 logger.error(f"Failed to quantize {k}: {e}")
+                if self._reraise_quant_errors:
+                    raise
                 # If quantization fails, use original weights
                 yield (k, v)
+                continue
+
+            for name, tensor in quantized:
+                yield (name, tensor)
+
+            # Explicitly delete to help GC
+            del quantized

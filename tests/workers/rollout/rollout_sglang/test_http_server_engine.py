@@ -528,31 +528,6 @@ class TestHttpServerEngineAdapter:
                 },
             )
 
-    def test_post_process_weights(self, mock_launch_server_process, basic_adapter_kwargs):
-        from verl.workers.rollout.sglang_rollout.http_server_engine import HttpServerAdapter
-
-        basic_adapter_kwargs.setdefault("node_rank", 0)
-        adapter = HttpServerAdapter(**basic_adapter_kwargs)
-
-        with patch.object(adapter, "_make_request") as mock_request:
-            mock_request.return_value = {"success": True, "message": "Success"}
-
-            result = adapter.post_process_weights(
-                restore_weights_before_load=True,
-                post_process_quantization=True,
-                post_load_weights=True,
-            )
-
-            assert result == {"success": True, "message": "Success"}
-            mock_request.assert_called_once_with(
-                "post_process_weights",
-                {
-                    "restore_weights_before_load": True,
-                    "post_process_quantization": True,
-                    "post_load_weights": True,
-                },
-            )
-
     def test_generate(self, mock_launch_server_process, basic_adapter_kwargs):
         """Test generate method."""
         adapter = HttpServerAdapter(**basic_adapter_kwargs)
@@ -822,30 +797,6 @@ class TestAsyncHttpServerEngineAdapter:
         result = await adapter._make_async_request("test_endpoint")
 
         assert result == {}
-
-    @pytest.mark.asyncio
-    async def test_async_post_process_weights(self, mock_launch_server_process, basic_adapter_kwargs):
-        """Test async post-process weights request."""
-        adapter = AsyncHttpServerAdapter(**basic_adapter_kwargs)
-
-        with patch.object(adapter, "_make_async_request", new_callable=AsyncMock) as mock_request:
-            mock_request.return_value = {"success": True, "message": "Success"}
-
-            result = await adapter.post_process_weights(
-                restore_weights_before_load=True,
-                post_process_quantization=True,
-                post_load_weights=True,
-            )
-
-            assert result == {"success": True, "message": "Success"}
-            mock_request.assert_called_once_with(
-                "post_process_weights",
-                {
-                    "restore_weights_before_load": True,
-                    "post_process_quantization": True,
-                    "post_load_weights": True,
-                },
-            )
 
     @pytest.mark.asyncio
     async def test_async_generate(self, mock_launch_server_process, basic_adapter_kwargs):

@@ -308,7 +308,6 @@ class SGLangHttpServer:
             "trust_remote_code": self.model_config.trust_remote_code,
             "max_running_requests": self.config.get("max_num_seqs", None),
             "log_level": "error",
-            "disable_piecewise_cuda_graph": self.config.enforce_eager,
             "mm_attention_backend": mm_attention_backend,
             "attention_backend": attention_backend,
             "skip_tokenizer_init": self.config.skip_tokenizer_init,

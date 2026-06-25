@@ -338,6 +338,21 @@ class ServerAdapter(BaseRollout):
                 await self._engine.load_lora_adapter_from_tensor(req)
         else:
             update_weights_bucket_bytes = int(self.config.checkpoint_engine.update_weights_bucket_megabytes) << 20
+
+            # [TEMP DEBUG] log shapes of MoE expert tensors verl sends to sglang, to
+            # diagnose the "tensor a (64) vs b (2048) at dim 2" mismatch in _load_w13.
+            def _debug_log_expert_shapes(gen):
+                _n = 0
+                for _name, _t in gen:
+                    if ".mlp.experts." in _name and ".layers.0." in _name and _n < 8:
+                        logger.info(
+                            f"[update_weights DEBUG] name={_name} shape={tuple(_t.shape)} dtype={_t.dtype}"
+                        )
+                        _n += 1
+                    yield _name, _t
+
+            weights = _debug_log_expert_shapes(weights)
+
             if self.config.get("quantization", None) == "fp8":
                 from verl.utils.sglang.sglang_fp8_utils import SGLangFP8QuantizerHelper
 
@@ -370,9 +385,6 @@ class ServerAdapter(BaseRollout):
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
-            if self.config.get("quantization", None) == "mxfp8":
-                logger.info("Post-process SGLang MXFP8 weights after loading")
-                await self._engine.post_process_weights(post_process_quantization=True)
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)

@@ -24,25 +24,21 @@ async def _collect(async_iterable):
     return [item async for item in async_iterable]
 
 
-def test_get_mxfp8_quant_config_copies_mutable_defaults():
+def test_get_mxfp8_quant_config_returns_expected_fields():
     config = mxfp8.get_mxfp8_quant_config()
 
+    assert config["activation_scheme"] == "dynamic"
+    assert config["fmt"] == "e4m3"
     assert config["quant_method"] == "mxfp8"
     assert config["weight_block_size"] == [1, 32]
     assert config["scale_fmt"] == "ue8m0"
-    assert config["ignored_layers"] == config["modules_to_not_convert"]
-    for module_name in ("lm_head", "embed_tokens", "router", "mlp.gate", "eh_proj", "weights_proj"):
-        assert module_name in config["modules_to_not_convert"]
-
-    config["weight_block_size"].append(128)
-    config["modules_to_not_convert"].append("mutated")
-
-    fresh_config = mxfp8.get_mxfp8_quant_config()
-    assert fresh_config["weight_block_size"] == [1, 32]
-    assert "mutated" not in fresh_config["modules_to_not_convert"]
+    # Mirrors the FP8 hardcode: exactly these five fields, no module skip lists.
+    assert set(config) == {"activation_scheme", "fmt", "quant_method", "weight_block_size", "scale_fmt"}
 
 
-def test_should_quantize_param_matches_sglang_mxfp8_policy():
+def test_should_quantize_param_matches_fp8_policy():
+    # SGLangMXFP8QuantizerHelper reuses the base FP8 should_quantize_param, so the
+    # selection policy here mirrors verl/utils/fp8_utils.py (name-based, no shape check).
     helper = mxfp8.SGLangMXFP8QuantizerHelper(mxfp8.get_mxfp8_quant_config())
     quantizable = torch.empty(8, 64, dtype=torch.bfloat16)
 
@@ -52,7 +48,6 @@ def test_should_quantize_param_matches_sglang_mxfp8_policy():
     assert not helper.should_quantize_param("model.layers.0.input_layernorm.weight", quantizable)
     assert not helper.should_quantize_param("model.embed_tokens.weight", quantizable)
     assert not helper.should_quantize_param("model.layers.0.self_attn.q_proj.bias", quantizable)
-    assert not helper.should_quantize_param("model.layers.0.self_attn.q_proj.weight", torch.empty(8, 63))
 
 
 def test_quant_weights_by_name_emits_mxfp8_scale_tensor(monkeypatch):
@@ -61,7 +56,7 @@ def test_quant_weights_by_name_emits_mxfp8_scale_tensor(monkeypatch):
         scale = torch.ones((tensor_2d.shape[0], tensor_2d.shape[1] // 32), dtype=torch.uint8)
         return qweight, scale
 
-    monkeypatch.setattr(mxfp8, "_quantize_mxfp8", fake_quantize)
+    monkeypatch.setattr(mxfp8, "_quantize_with_sglang", fake_quantize)
 
     helper = mxfp8.SGLangMXFP8QuantizerHelper(mxfp8.get_mxfp8_quant_config())
     weights = [
