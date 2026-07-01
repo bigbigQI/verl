@@ -1,0 +1,24 @@
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -3554,6 +3554,20 @@ class ModelRunner:
+                     with device_loading_context(module, target_device):
+                         quant_method.restore_weights_before_loading(module)
+ 
++        if recv_req.post_process_quantization:
++            # FlashInfer MXFP8 MoE row-shuffle indices are CUDA tensors. The
++            # initial cache is created while model weights are inside the
++            # torch-memory-saver "weights" region, so release/resume invalidates
++            # its contents without removing the Python cache entries. Reusing
++            # those stale indices corrupts every expert during online refit.
++            # Rebuild the small index cache outside the paused region before
++            # applying quantization post-processing.
++            from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
++                _flashinfer_trtllm_shuffle_row_indices_cache_mxfp8,
++            )
++
++            _flashinfer_trtllm_shuffle_row_indices_cache_mxfp8.clear()
++
+         if recv_req.post_process_quantization:
+             # Iterate through all modules to apply specific post-loading processing
+             for _, module in self.model.named_modules():

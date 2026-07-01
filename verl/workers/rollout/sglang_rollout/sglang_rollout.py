@@ -385,6 +385,9 @@ class ServerAdapter(BaseRollout):
                 )
 
         if self._engine is not None and self._is_server_tp_leader():
+            if self.config.get("quantization", None) == "mxfp8":
+                logger.info("Post-process SGLang MXFP8 weights after loading")
+                await self._engine.post_process_weights(post_process_quantization=True)
             await self._engine.flush_cache()
             if global_steps is not None:
                 await self.server_actor.set_global_steps.remote(global_steps)
